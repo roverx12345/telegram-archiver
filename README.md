@@ -57,6 +57,42 @@ uv pip install -e '.[dev]'
 tele-bot
 ```
 
+## Windows 运行
+
+在 Windows 上建议直接运行 Python 版，不必额外折腾本地 Bot API server。
+
+```powershell
+git clone https://github.com/roverx12345/tele_bot.git
+cd tele_bot
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+copy .env.example .env
+```
+
+然后编辑 `.env`，至少填写：
+
+```env
+BOT_TOKEN=...
+PAIR_CODE=...
+DOWNLOAD_DIR=./downloads
+DB_PATH=./data/bot.db
+LOCAL_BOT_API_URL=
+LOG_LEVEL=INFO
+```
+
+启动命令：
+
+```powershell
+.venv\Scripts\tele-bot.exe
+```
+
+如果 PowerShell 默认禁止脚本执行，可以先运行：
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
 ## Docker Compose
 
 如果你想同时跑 bot 和本地 Bot API server：
