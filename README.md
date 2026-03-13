@@ -68,13 +68,50 @@ uv pip install -e '.[dev]'
 tele-bot
 ```
 
+## Linux 部署
+
+建议在 Linux 上直接用 `systemd + Python venv` 部署，简单且稳定。
+
+```bash
+git clone https://github.com/roverx12345/telegram-forward-archiver-bot.git /opt/telegram-forward-archiver-bot
+cd /opt/telegram-forward-archiver-bot
+cp .env.example .env
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+```
+
+把 `.env` 填好后，可以先手动启动验证：
+
+```bash
+source .venv/bin/activate
+tele-bot
+```
+
+项目已提供 `systemd` 模板：[tele-bot.service](/Users/roverx/Documents/app/tele_bot/deploy/systemd/tele-bot.service)
+
+把它复制到 `/etc/systemd/system/tele-bot.service` 后，根据你的实际 Linux 用户和部署目录修改这些字段：
+
+- `User=telebot`
+- `WorkingDirectory=/opt/telegram-forward-archiver-bot`
+- `ExecStart=/opt/telegram-forward-archiver-bot/.venv/bin/tele-bot`
+
+启用服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now tele-bot
+sudo systemctl status tele-bot
+journalctl -u tele-bot -f
+```
+
 ## Windows 运行
 
 在 Windows 上建议直接运行 Python 版，不必额外折腾本地 Bot API server。
 
 ```powershell
-git clone https://github.com/roverx12345/tele_bot.git
-cd tele_bot
+git clone https://github.com/roverx12345/telegram-forward-archiver-bot.git
+cd telegram-forward-archiver-bot
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
@@ -120,6 +157,21 @@ TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 LOCAL_BOT_API_URL=http://telegram-bot-api:8081
 ```
+
+## CI
+
+项目已提供 GitHub Actions 工作流：[ci.yml](/Users/roverx/Documents/app/tele_bot/.github/workflows/ci.yml)
+
+默认会在以下场景自动执行：
+
+- push 到 `main`
+- pull request
+
+执行内容包括：
+
+- 安装依赖
+- 运行 `pytest -q`
+- 运行 `python -m compileall src tests`
 
 ## 使用方式
 

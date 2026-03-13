@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Forward Archiver Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=telebot
+WorkingDirectory=/opt/telegram-forward-archiver-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/telegram-forward-archiver-bot/.venv/bin/tele-bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
