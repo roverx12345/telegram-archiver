@@ -9,6 +9,7 @@
 3. 支持 `/pair <code>` 配对授权，避免任意知道 bot 用户名的人都能直接使用。
 4. 支持接入本地 Telegram Bot API server 来加速下载。
 5. bot 重启后会继续处理 Telegram 仍保留的积压消息，不会在启动时主动清空。
+6. 下载任务会落库保存，失败后可自动重试，异常重启后会继续恢复未完成任务。
 
 ## 方案说明
 
@@ -17,6 +18,14 @@
 - 第一层：收到消息后先查 `file_unique_id`。命中则直接跳过，不重新下载。
 - 第二层：若 `file_unique_id` 未命中，先下载到临时目录，计算 `sha256`。
 - 若 `sha256` 已存在，说明虽然 Telegram 侧标识不同，但内容已经保存过，删除临时文件并记录别名映射。
+
+### 任务恢复与重试
+
+- 每条待下载的转发媒体都会先写入 `download_jobs` 表。
+- 下载开始时状态会变成 `downloading`，成功后变成 `completed`，命中重复则记为 `duplicate`。
+- 下载失败会记为 `failed` 并记录错误原因。
+- bot 重启时会扫描 `pending / downloading / failed` 且未超过重试上限的任务，自动再次尝试下载。
+- 当前恢复是“重新下载整文件”，不是断点续传。
 
 ### 为什么还要做配对
 
@@ -41,6 +50,7 @@ PAIR_CODE=...
 DOWNLOAD_DIR=./downloads
 DB_PATH=./data/bot.db
 LOCAL_BOT_API_URL=http://telegram-bot-api:8081
+MAX_DOWNLOAD_RETRIES=3
 ```
 
 如果你不想启用配对，可以删掉 `PAIR_CODE`，并设置：
@@ -80,6 +90,7 @@ DOWNLOAD_DIR=./downloads
 DB_PATH=./data/bot.db
 LOCAL_BOT_API_URL=
 LOG_LEVEL=INFO
+MAX_DOWNLOAD_RETRIES=3
 ```
 
 启动命令：

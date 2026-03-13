@@ -22,6 +22,7 @@ class Settings:
     local_bot_api_url: str | None
     log_level: str
     allow_unpaired_private: bool
+    max_download_retries: int
 
 
 def load_settings() -> Settings:
@@ -47,4 +48,5 @@ def load_settings() -> Settings:
         local_bot_api_url=local_bot_api_url,
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         allow_unpaired_private=_to_bool(os.getenv("ALLOW_UNPAIRED_PRIVATE"), default=False),
+        max_download_retries=max(1, int(os.getenv("MAX_DOWNLOAD_RETRIES", "3"))),
     )
