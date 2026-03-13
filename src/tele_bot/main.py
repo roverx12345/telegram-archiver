@@ -16,7 +16,7 @@ def main() -> None:
 
     database = Database(settings.db_path)
     application = build_application(settings, database)
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(drop_pending_updates=False)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 2. 不按文件名去重，优先使用 Telegram 的 `file_unique_id`，再用下载后的 `sha256` 做二次确认。
 3. 支持 `/pair <code>` 配对授权，避免任意知道 bot 用户名的人都能直接使用。
 4. 支持接入本地 Telegram Bot API server 来加速下载。
+5. bot 重启后会继续处理 Telegram 仍保留的积压消息，不会在启动时主动清空。
 
 ## 方案说明
 
@@ -114,6 +115,16 @@ LOCAL_BOT_API_URL=http://telegram-bot-api:8081
 1. 在 Telegram 私聊中先发 `/pair <你的配对码>`。
 2. 把媒体消息转发给 bot。
 3. bot 会自动判断是否已保存；未保存则下载，已保存则直接跳过。
+
+## 离线补拉说明
+
+当前版本启动时不会清空 Telegram 的 pending updates，因此如果 bot 短时间离线，重新上线后会继续处理 Telegram 仍然保留的未投递消息。
+
+但这不是无限补拉：
+
+- 能补到的前提是 Telegram 仍保留这些 pending updates。
+- Telegram 官方通常不会保留超过 24 小时的未投递 update。
+- 如果离线时间过长，超出 Telegram 的保留窗口，这部分消息仍然拿不回来。
 
 ## 当前支持的媒体类型
 
