@@ -27,6 +27,9 @@ def build_application(settings: Settings, database: Database) -> Application:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("pair", pair_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("jobs", jobs_command))
+    application.add_handler(CommandHandler("failed", failed_command))
+    application.add_handler(CommandHandler("retry_failed", retry_failed_command))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     return application
 
@@ -36,7 +39,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     auth_required = bool(settings.pair_code) and not settings.allow_unpaired_private
     text = (
         "把需要归档的媒体转发给我，我会自动下载、去重并保存。\n"
-        "目前支持 document / video / audio / voice / animation / photo / sticker / video_note。"
+        "目前支持 document / video / audio / voice / animation / photo / sticker / video_note。\n"
+        "可用命令: /status, /jobs, /failed, /retry_failed"
     )
     if auth_required:
         text += "\n\n首次使用请先发送 `/pair <配对码>`。"
@@ -75,10 +79,14 @@ async def pair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message, chat, _user = await require_authorized_private_chat(update, context)
+    if message is None or chat is None:
+        return
+
     database = get_db(context)
     files_count, users_count = database.stats()
-    job_stats = database.job_stats()
-    await update.effective_message.reply_text(
+    job_stats = database.chat_job_stats(chat.id)
+    await message.reply_text(
         "已保存文件: {files}\n已授权会话: {users}\n待处理任务: {pending}\n下载中: {downloading}\n失败任务: {failed}".format(
             files=files_count,
             users=users_count,
@@ -87,6 +95,96 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             failed=job_stats.get("failed", 0),
         )
     )
+
+
+async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message, chat, _user = await require_authorized_private_chat(update, context)
+    if message is None or chat is None:
+        return
+
+    database = get_db(context)
+    stats = database.chat_job_stats(chat.id)
+    jobs = database.list_jobs(source_chat_id=chat.id, limit=8)
+    if not jobs:
+        await message.reply_text("当前会话还没有下载任务。")
+        return
+
+    lines = [
+        "任务概览",
+        "pending={pending} downloading={downloading} failed={failed} completed={completed} duplicate={duplicate}".format(
+            pending=stats.get("pending", 0),
+            downloading=stats.get("downloading", 0),
+            failed=stats.get("failed", 0),
+            completed=stats.get("completed", 0),
+            duplicate=stats.get("duplicate", 0),
+        ),
+        "",
+        "最近任务:",
+    ]
+    for job in jobs:
+        lines.append(format_job_line(job))
+    await message.reply_text("\n".join(lines))
+
+
+async def failed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message, chat, _user = await require_authorized_private_chat(update, context)
+    if message is None or chat is None:
+        return
+
+    database = get_db(context)
+    settings = get_settings(context)
+    retryable = database.get_retryable_failed_jobs(
+        source_chat_id=chat.id,
+        max_download_retries=settings.max_download_retries,
+        limit=10,
+    )
+    exhausted = database.list_jobs(source_chat_id=chat.id, limit=10, statuses=("failed",))
+    exhausted = [job for job in exhausted if job.retry_count >= settings.max_download_retries]
+
+    if not retryable and not exhausted:
+        await message.reply_text("当前会话没有失败任务。")
+        return
+
+    lines = ["失败任务"]
+    if retryable:
+        lines.append("可重试:")
+        for job in retryable:
+            lines.append(format_job_line(job))
+    if exhausted:
+        if retryable:
+            lines.append("")
+        lines.append("已达重试上限:")
+        for job in exhausted[:10]:
+            lines.append(format_job_line(job))
+    await message.reply_text("\n".join(lines))
+
+
+async def retry_failed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message, chat, _user = await require_authorized_private_chat(update, context)
+    if message is None or chat is None:
+        return
+
+    database = get_db(context)
+    settings = get_settings(context)
+    jobs = database.get_retryable_failed_jobs(
+        source_chat_id=chat.id,
+        max_download_retries=settings.max_download_retries,
+        limit=20,
+    )
+    if not jobs:
+        await message.reply_text("当前没有可重试的失败任务。")
+        return
+
+    await message.reply_text(f"准备重试 {len(jobs)} 个失败任务。")
+    for job in jobs:
+        await process_download_job(
+            bot=context.bot,
+            settings=settings,
+            database=database,
+            job=job,
+            notifier=message.reply_text,
+            recovery_mode=True,
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,6 +350,27 @@ def is_authorized(settings: Settings, database: Database, user_id: int, chat_id:
     return database.is_authorized(user_id, chat_id)
 
 
+async def require_authorized_private_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    settings = get_settings(context)
+    database = get_db(context)
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if message is None or chat is None or user is None:
+        return None, None, None
+
+    if chat.type != "private":
+        await message.reply_text("这些管理命令只能在私聊里使用。")
+        return message, None, None
+
+    if not is_authorized(settings, database, user.id, chat.id):
+        await message.reply_text("当前会话尚未配对，请先发送 `/pair <配对码>`。", parse_mode="Markdown")
+        return message, chat, None
+
+    return message, chat, user
+
+
 def describe_forward_source(message) -> str | None:
     origin = getattr(message, "forward_origin", None)
     if origin is not None:
@@ -316,3 +435,19 @@ def chat_notifier(bot: Bot, chat_id: int):
         await bot.send_message(chat_id=chat_id, text=text)
 
     return _notify
+
+
+def format_job_line(job: DownloadJob) -> str:
+    label = job.original_name or job.media_type
+    if len(label) > 32:
+        label = f"{label[:29]}..."
+    error = ""
+    if job.last_error:
+        compact = job.last_error.replace("\n", " ")
+        if len(compact) > 48:
+            compact = f"{compact[:45]}..."
+        error = f" error={compact}"
+    return (
+        f"- msg={job.source_message_id} status={job.status} tries={job.retry_count} "
+        f"name={label}{error}"
+    )

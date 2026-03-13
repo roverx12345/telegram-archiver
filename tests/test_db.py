@@ -72,3 +72,66 @@ def test_existing_job_is_reused(tmp_path: Path) -> None:
     assert second.id == first.id
     assert second.status == "duplicate"
     assert second.final_path == "/tmp/a.bin"
+
+
+def test_list_jobs_and_retryable_failed_jobs(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+    first = db.create_or_get_download_job(
+        source_chat_id=99,
+        source_message_id=1,
+        requester_user_id=1,
+        telegram_file_id="f1",
+        telegram_file_unique_id="u1",
+        media_type="video",
+        original_name="one.mp4",
+        mime_type="video/mp4",
+        file_size=1,
+        forwarded_from="chat",
+    )
+    second = db.create_or_get_download_job(
+        source_chat_id=99,
+        source_message_id=2,
+        requester_user_id=1,
+        telegram_file_id="f2",
+        telegram_file_unique_id="u2",
+        media_type="video",
+        original_name="two.mp4",
+        mime_type="video/mp4",
+        file_size=2,
+        forwarded_from="chat",
+    )
+    third = db.create_or_get_download_job(
+        source_chat_id=99,
+        source_message_id=3,
+        requester_user_id=1,
+        telegram_file_id="f3",
+        telegram_file_unique_id="u3",
+        media_type="video",
+        original_name="three.mp4",
+        mime_type="video/mp4",
+        file_size=3,
+        forwarded_from="chat",
+    )
+
+    db.start_download_attempt(first.id)
+    db.mark_job_failed(first.id, error="network")
+    db.start_download_attempt(second.id)
+    db.mark_job_failed(second.id, error="timeout")
+    db.start_download_attempt(second.id)
+    db.mark_job_failed(second.id, error="timeout")
+    db.start_download_attempt(second.id)
+    db.mark_job_failed(second.id, error="timeout")
+    db.mark_job_completed(third.id, final_path="/tmp/three.mp4", file_sha256="abc")
+
+    jobs = db.list_jobs(source_chat_id=99, limit=10)
+    assert [job.source_message_id for job in jobs] == [3, 2, 1]
+
+    failed_only = db.list_jobs(source_chat_id=99, limit=10, statuses=("failed",))
+    assert [job.source_message_id for job in failed_only] == [2, 1]
+
+    retryable = db.get_retryable_failed_jobs(source_chat_id=99, max_download_retries=3, limit=10)
+    assert [job.source_message_id for job in retryable] == [1]
+
+    stats = db.chat_job_stats(99)
+    assert stats["failed"] == 2
+    assert stats["completed"] == 1

@@ -370,6 +370,61 @@ class Database:
         ).fetchall()
         return [self._download_job_from_row(row) for row in rows]
 
+    def list_jobs(
+        self,
+        *,
+        source_chat_id: int,
+        limit: int = 10,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[DownloadJob]:
+        params: list[object] = [source_chat_id]
+        sql = """
+            SELECT *
+            FROM download_jobs
+            WHERE source_chat_id = ?
+        """
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            sql += f" AND status IN ({placeholders})"
+            params.extend(statuses)
+        sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = self.connection.execute(sql, params).fetchall()
+        return [self._download_job_from_row(row) for row in rows]
+
+    def get_retryable_failed_jobs(
+        self,
+        *,
+        source_chat_id: int,
+        max_download_retries: int,
+        limit: int = 20,
+    ) -> list[DownloadJob]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM download_jobs
+            WHERE source_chat_id = ?
+              AND status = 'failed'
+              AND retry_count < ?
+            ORDER BY updated_at ASC, id ASC
+            LIMIT ?
+            """,
+            (source_chat_id, max_download_retries, limit),
+        ).fetchall()
+        return [self._download_job_from_row(row) for row in rows]
+
+    def chat_job_stats(self, source_chat_id: int) -> dict[str, int]:
+        rows = self.connection.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM download_jobs
+            WHERE source_chat_id = ?
+            GROUP BY status
+            """,
+            (source_chat_id,),
+        ).fetchall()
+        return {row["status"]: row["count"] for row in rows}
+
     def start_download_attempt(self, job_id: int) -> DownloadJob:
         self.connection.execute(
             """

@@ -127,6 +127,13 @@ LOCAL_BOT_API_URL=http://telegram-bot-api:8081
 2. 把媒体消息转发给 bot。
 3. bot 会自动判断是否已保存；未保存则下载，已保存则直接跳过。
 
+### 管理命令
+
+- `/status`：查看当前会话的任务统计。
+- `/jobs`：查看最近任务和状态摘要。
+- `/failed`：查看失败任务，以及哪些任务还能重试。
+- `/retry_failed`：手动重试当前会话内还没超过上限的失败任务。
+
 ## 离线补拉说明
 
 当前版本启动时不会清空 Telegram 的 pending updates，因此如果 bot 短时间离线，重新上线后会继续处理 Telegram 仍然保留的未投递消息。
