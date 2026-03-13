@@ -9,6 +9,7 @@ Telegram bot for forwarded media archiving with dedupe, retry, and restart recov
 - Automatically downloads forwarded media sent to the bot in private chat.
 - Deduplicates by Telegram `file_unique_id` first, then by downloaded file `sha256`.
 - Supports pairing-based authorization with `/pair <code>`.
+- Auto-registers Telegram command menu, bot description, and `/help` on startup.
 - Persists download jobs and retries them after failures or restarts.
 - Preserves pending Telegram updates on restart.
 - Includes job inspection commands: `/status`, `/jobs`, `/failed`, `/retry_failed`.

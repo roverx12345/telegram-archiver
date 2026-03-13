@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from telegram import Bot, Update
+from telegram import Bot, BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .config import Settings
@@ -12,6 +12,7 @@ from .media import MediaRef, build_storage_name, extract_media_ref, is_forwarded
 
 
 LOGGER = logging.getLogger(__name__)
+REPO_URL = "https://github.com/roverx12345/telegram-forward-archiver-bot"
 
 
 def build_application(settings: Settings, database: Database) -> Application:
@@ -25,6 +26,7 @@ def build_application(settings: Settings, database: Database) -> Application:
     application.bot_data["db"] = database
 
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("pair", pair_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("jobs", jobs_command))
@@ -36,15 +38,12 @@ def build_application(settings: Settings, database: Database) -> Application:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings(context)
-    auth_required = bool(settings.pair_code) and not settings.allow_unpaired_private
-    text = (
-        "把需要归档的媒体转发给我，我会自动下载、去重并保存。\n"
-        "目前支持 document / video / audio / voice / animation / photo / sticker / video_note。\n"
-        "可用命令: /status, /jobs, /failed, /retry_failed"
-    )
-    if auth_required:
-        text += "\n\n首次使用请先发送 `/pair <配对码>`。"
-    await update.effective_message.reply_text(text, parse_mode="Markdown")
+    await update.effective_message.reply_text(build_help_text(settings, include_intro=True))
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = get_settings(context)
+    await update.effective_message.reply_text(build_help_text(settings, include_intro=False))
 
 
 async def pair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -328,6 +327,7 @@ async def process_download_job(
 async def post_init(application: Application) -> None:
     settings: Settings = application.bot_data["settings"]
     database: Database = application.bot_data["db"]
+    await configure_bot_profile(application.bot, settings)
     jobs = database.get_recoverable_jobs(settings.max_download_retries)
     if not jobs:
         return
@@ -451,3 +451,69 @@ def format_job_line(job: DownloadJob) -> str:
         f"- msg={job.source_message_id} status={job.status} tries={job.retry_count} "
         f"name={label}{error}"
     )
+
+
+async def configure_bot_profile(bot: Bot, settings: Settings) -> None:
+    await bot.set_my_commands(bot_commands(settings))
+    await bot.set_my_description(
+        "转发媒体给 bot 后自动归档、去重、失败重试，并在重启后恢复未完成任务。"
+    )
+    await bot.set_my_short_description(
+        "转发媒体即可自动保存、去重和恢复。"
+    )
+
+
+def bot_commands(settings: Settings) -> list[BotCommand]:
+    commands = [
+        BotCommand("start", "显示快速开始和使用说明"),
+        BotCommand("help", "显示命令列表和文档链接"),
+    ]
+    if settings.pair_code or not settings.allow_unpaired_private:
+        commands.append(BotCommand("pair", "把当前私聊会话和 bot 配对"))
+    commands.extend(
+        [
+            BotCommand("status", "查看当前会话统计"),
+            BotCommand("jobs", "查看最近任务"),
+            BotCommand("failed", "查看失败任务"),
+            BotCommand("retry_failed", "重试失败任务"),
+        ]
+    )
+    return commands
+
+
+def build_help_text(settings: Settings, *, include_intro: bool) -> str:
+    lines: list[str] = []
+    if include_intro:
+        lines.extend(
+            [
+                "把转发来的媒体消息发给我，我会自动归档、去重，并在失败后重试。",
+                "支持的媒体类型：document、video、audio、voice、animation、photo、sticker、video_note。",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "可用命令：",
+            "/start - 快速开始和使用说明",
+            "/help - 命令列表和文档链接",
+        ]
+    )
+    if settings.pair_code or not settings.allow_unpaired_private:
+        lines.append("/pair <code> - 配对当前私聊会话")
+    lines.extend(
+        [
+            "/status - 当前会话统计",
+            "/jobs - 最近任务",
+            "/failed - 失败任务",
+            "/retry_failed - 重试失败任务",
+            "",
+            "文档：",
+            f"English README: {REPO_URL}",
+            f"中文 README: {REPO_URL}/blob/main/README.zh-CN.md",
+            f"Linux 教程: {REPO_URL}/blob/main/docs/en/linux-deployment.md",
+            f"Windows 教程: {REPO_URL}/blob/main/docs/en/windows-setup.md",
+            f"Docker 教程: {REPO_URL}/blob/main/docs/en/docker-setup.md",
+        ]
+    )
+    return "\n".join(lines)
