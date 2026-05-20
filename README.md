@@ -50,6 +50,8 @@ MAX_DOWNLOAD_RETRIES=3
 - [systemd service template](./deploy/systemd/tele-bot.service)
 - [Linux bootstrap script](./deploy/linux/install.sh)
 - [GitHub Actions CI workflow](./.github/workflows/ci.yml)
+- [Base Docker Compose](./docker-compose.yml)
+- [Large-files Docker override](./docker-compose.large-files.yml)
 
 ## Development
 

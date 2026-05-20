@@ -145,19 +145,35 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ## Docker Compose
 
-如果你想同时跑 bot 和本地 Bot API server：
+项目现在拆成两种 Docker 模式：
+
+- 基础模式：只启动 bot，适合普通文件。
+- 大文件模式：额外启动本地 Bot API server，适合超过官方云端下载上限的文件。
+
+基础模式：
 
 ```bash
 docker compose up --build
 ```
 
-还需要在 `.env` 里补充：
+大文件模式：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.large-files.yml up --build
+```
+
+如果要启用大文件模式，还需要在 `.env` 里补充：
 
 ```env
 TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
-LOCAL_BOT_API_URL=http://telegram-bot-api:8081
 ```
+
+说明：
+
+- `docker-compose.yml` 是基础版。
+- `docker-compose.large-files.yml` 会给 bot 注入 `LOCAL_BOT_API_URL=http://telegram-bot-api:8081`。
+- bot 容器会等待本地 Bot API server 就绪后再启动。
 
 ## CI
 
