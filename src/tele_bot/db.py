@@ -6,10 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 @dataclass(frozen=True)
 class SavedFileRecord:
@@ -19,7 +17,6 @@ class SavedFileRecord:
     media_type: str
     mime_type: str | None
     file_size: int | None
-
 
 @dataclass(frozen=True)
 class DownloadJob:
@@ -39,7 +36,6 @@ class DownloadJob:
     last_error: str | None
     final_path: str | None
     file_sha256: str | None
-
 
 class Database:
     def __init__(self, path: Path):
@@ -83,6 +79,33 @@ class Database:
                 media_type TEXT NOT NULL,
                 latest_seen_at TEXT NOT NULL,
                 source_message_id INTEGER,
+                FOREIGN KEY(file_sha256) REFERENCES saved_files(sha256)
+            );
+
+            CREATE TABLE IF NOT EXISTS saved_message_metadata (
+                source_message_id INTEGER PRIMARY KEY,
+                file_sha256 TEXT,
+                final_path TEXT,
+                chat_id INTEGER,
+                message_date TEXT,
+                edit_date TEXT,
+                text TEXT,
+                forwarded_sender_id INTEGER,
+                forwarded_chat_id INTEGER,
+                forwarded_channel_post INTEGER,
+                forwarded_date TEXT,
+                forwarded_post_author TEXT,
+                grouped_id INTEGER,
+                reply_to_msg_id INTEGER,
+                media_type TEXT,
+                mime_type TEXT,
+                original_name TEXT,
+                file_size INTEGER,
+                width INTEGER,
+                height INTEGER,
+                duration REAL,
+                telegram_file_id TEXT,
+                recorded_at TEXT NOT NULL,
                 FOREIGN KEY(file_sha256) REFERENCES saved_files(sha256)
             );
 
@@ -151,6 +174,30 @@ class Database:
             WHERE tfa.telegram_file_unique_id = ?
             """,
             (telegram_file_unique_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SavedFileRecord(
+            sha256=row["sha256"],
+            final_path=row["final_path"],
+            original_name=row["original_name"],
+            media_type=row["media_type"],
+            mime_type=row["mime_type"],
+            file_size=row["file_size"],
+        )
+
+    def get_saved_by_file_id(self, telegram_file_id: str) -> Optional[SavedFileRecord]:
+        row = self.connection.execute(
+            """
+            SELECT sf.sha256, sf.final_path, sf.original_name, sf.media_type, sf.mime_type, sf.file_size
+            FROM telegram_file_aliases tfa
+            JOIN saved_files sf ON sf.sha256 = tfa.file_sha256
+            WHERE tfa.telegram_file_id = ?
+              AND tfa.file_sha256 IS NOT NULL
+            ORDER BY tfa.latest_seen_at DESC
+            LIMIT 1
+            """,
+            (telegram_file_id,),
         ).fetchone()
         if row is None:
             return None
@@ -275,6 +322,74 @@ class Database:
             latest_name=original_name,
             source_message_id=source_message_id,
             file_sha256=sha256,
+        )
+        self.connection.commit()
+
+    def record_saved_message_metadata(
+        self,
+        *,
+        source_message_id: int,
+        file_sha256: str | None,
+        final_path: str | None,
+        chat_id: int | None,
+        message_date: str | None,
+        edit_date: str | None,
+        text: str | None,
+        forwarded_sender_id: int | None,
+        forwarded_chat_id: int | None,
+        forwarded_channel_post: int | None,
+        forwarded_date: str | None,
+        forwarded_post_author: str | None,
+        grouped_id: int | None,
+        reply_to_msg_id: int | None,
+        media_type: str | None,
+        mime_type: str | None,
+        original_name: str | None,
+        file_size: int | None,
+        width: int | None,
+        height: int | None,
+        duration: float | None,
+        telegram_file_id: str | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO saved_message_metadata(
+                source_message_id, file_sha256, final_path, chat_id, message_date, edit_date, text,
+                forwarded_sender_id, forwarded_chat_id, forwarded_channel_post, forwarded_date,
+                forwarded_post_author, grouped_id, reply_to_msg_id, media_type, mime_type,
+                original_name, file_size, width, height, duration, telegram_file_id, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_message_id) DO UPDATE SET
+                file_sha256 = COALESCE(excluded.file_sha256, saved_message_metadata.file_sha256),
+                final_path = COALESCE(excluded.final_path, saved_message_metadata.final_path),
+                chat_id = excluded.chat_id,
+                message_date = excluded.message_date,
+                edit_date = excluded.edit_date,
+                text = excluded.text,
+                forwarded_sender_id = excluded.forwarded_sender_id,
+                forwarded_chat_id = excluded.forwarded_chat_id,
+                forwarded_channel_post = excluded.forwarded_channel_post,
+                forwarded_date = excluded.forwarded_date,
+                forwarded_post_author = excluded.forwarded_post_author,
+                grouped_id = excluded.grouped_id,
+                reply_to_msg_id = excluded.reply_to_msg_id,
+                media_type = excluded.media_type,
+                mime_type = excluded.mime_type,
+                original_name = excluded.original_name,
+                file_size = excluded.file_size,
+                width = excluded.width,
+                height = excluded.height,
+                duration = excluded.duration,
+                telegram_file_id = excluded.telegram_file_id,
+                recorded_at = excluded.recorded_at
+            """,
+            (
+                source_message_id, file_sha256, final_path, chat_id, message_date, edit_date, text,
+                forwarded_sender_id, forwarded_chat_id, forwarded_channel_post, forwarded_date,
+                forwarded_post_author, grouped_id, reply_to_msg_id, media_type, mime_type,
+                original_name, file_size, width, height, duration, telegram_file_id, utc_now(),
+            ),
         )
         self.connection.commit()
 

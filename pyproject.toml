@@ -7,6 +7,8 @@ requires-python = ">=3.9"
 dependencies = [
     "python-dotenv>=1.0,<2.0",
     "python-telegram-bot>=21.9,<22.0",
+    "telethon>=1.38,<2.0",
+    "PySocks>=1.7,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -16,6 +18,7 @@ dev = [
 
 [project.scripts]
 tele-bot = "tele_bot.main:main"
+tele-saved-archiver = "tele_bot.saved_archiver:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

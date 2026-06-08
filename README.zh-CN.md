@@ -54,6 +54,12 @@ LOCAL_BOT_API_URL=http://telegram-bot-api:8081
 MAX_DOWNLOAD_RETRIES=3
 ```
 
+如果运行 `tele-saved-archiver` 下载 Saved Messages，可以让 Telethon 单独走 SOCKS5：
+
+```env
+TELETHON_PROXY=socks5h://用户名:密码@代理地址:端口
+```
+
 如果你不想启用配对，可以删掉 `PAIR_CODE`，并设置：
 
 ```env
