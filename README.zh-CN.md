@@ -43,6 +43,8 @@
 - 如果下载中断，`.part` 文件会保留。
 - 下次处理同一条 Saved Messages 媒体时，会从 `.part` 当前大小继续下载。
 - 下载完整后才会计算 `sha256`、去重、移动到最终分类目录。
+- `telegram-archiver clean-tmp --older-than-days 30` 可以预览超过 30 天未修改的 `.part` 半成品；加 `--delete` 才会真正删除。宿主机直接运行时可用 `--download-dir /srv/nas/nasdata/telegram-forward-archiver-bot/downloads` 覆盖 Docker 内部路径。
+- 删除旧 `.part` 前建议先停掉正在下载的服务。
 - `telegram-archiver bot` 仍然是失败后整文件重试，不做断点续传。
 
 ### 两套 source 的关系

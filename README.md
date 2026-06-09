@@ -58,6 +58,7 @@ SAVED_ARCHIVE_EXISTING=true
 telegram-archiver bot
 telegram-archiver saved
 telegram-archiver saved-stats
+telegram-archiver clean-tmp
 telegram-archiver all
 ```
 
@@ -68,6 +69,16 @@ DOWNLOAD_DIR/.tmp/*.part
 ```
 
 The bot source still retries failed downloads from the beginning.
+
+Stale partial files can be reviewed and cleaned with:
+
+```bash
+telegram-archiver clean-tmp --older-than-days 30
+telegram-archiver clean-tmp --older-than-days 30 --delete
+telegram-archiver clean-tmp --download-dir /srv/nas/nasdata/telegram-forward-archiver-bot/downloads --older-than-days 30
+```
+
+Without `--delete`, `clean-tmp` only prints a dry-run summary. Stop active download services before deleting stale partial files.
 
 If Docker `saved-archiver` is already running, stop it before `saved-stats` because Telethon uses the same session file:
 

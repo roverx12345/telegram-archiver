@@ -11,6 +11,7 @@
 - `telegram-archiver bot` runs the forward-to-bot source.
 - `telegram-archiver saved` runs the Saved Messages source.
 - `telegram-archiver saved-stats` scans Saved Messages and prints download candidate counts without downloading. Use `--limit N` for a quick sample. Stop the running `saved-archiver` service first if it uses the same Telethon session.
+- `telegram-archiver clean-tmp --older-than-days 30` prints a dry-run summary of stale `DOWNLOAD_DIR/.tmp/*.part` files. Add `--delete` to remove them after stopping active download services. Use `--download-dir PATH` when running on the host with a Docker-only `DOWNLOAD_DIR`.
 - `telegram-archiver all` runs both sources under one supervisor.
 
 ## Useful commands

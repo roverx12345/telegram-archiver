@@ -5,11 +5,13 @@ import asyncio
 import logging
 import multiprocessing
 import time
+from pathlib import Path
 
 from .bot import build_application
-from .config import load_settings
+from .config import load_download_dir, load_settings
 from .db import Database
 from .saved_archiver import run_archiver, run_saved_stats
+from .tmp_cleanup import clean_tmp_part_files, format_tmp_cleanup_result
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -23,6 +25,10 @@ def main(argv: list[str] | None = None) -> None:
     saved_stats_parser = subparsers.add_parser("saved-stats", help="Scan Saved Messages and print download candidate counts.")
     saved_stats_parser.add_argument("--limit", type=int, default=None, help="Only scan the newest N Saved Messages.")
     saved_stats_parser.add_argument("--progress-every", type=int, default=1000, help="Log progress every N scanned messages.")
+    clean_tmp_parser = subparsers.add_parser("clean-tmp", help="Clean stale resumable .part files from DOWNLOAD_DIR/.tmp.")
+    clean_tmp_parser.add_argument("--older-than-days", type=float, default=30.0, help="Only clean .part files older than this many days.")
+    clean_tmp_parser.add_argument("--download-dir", type=Path, default=None, help="Override DOWNLOAD_DIR, useful when running on the host instead of Docker.")
+    clean_tmp_parser.add_argument("--delete", action="store_true", help="Actually delete files. Without this flag, only print a dry-run summary.")
     subparsers.add_parser("all", help="Run both sources under one supervisor.")
     args = parser.parse_args(argv)
 
@@ -33,6 +39,8 @@ def main(argv: list[str] | None = None) -> None:
         run_saved_source()
     elif source == "saved-stats":
         asyncio.run(run_saved_stats(limit=args.limit, progress_every=args.progress_every))
+    elif source == "clean-tmp":
+        run_tmp_cleanup(older_than_days=args.older_than_days, download_dir=args.download_dir, delete=args.delete)
     elif source == "all":
         run_all_sources()
     else:  # pragma: no cover - argparse prevents this path.
@@ -56,6 +64,20 @@ def run_bot_source() -> None:
 
 def run_saved_source() -> None:
     asyncio.run(run_archiver())
+
+
+def run_tmp_cleanup(*, older_than_days: float, download_dir: Path | None, delete: bool) -> None:
+    if older_than_days < 0:
+        raise SystemExit("--older-than-days must be greater than or equal to 0")
+
+    resolved_download_dir = download_dir.expanduser().resolve() if download_dir is not None else load_download_dir()
+    older_than_seconds = int(older_than_days * 24 * 60 * 60)
+    result = clean_tmp_part_files(
+        resolved_download_dir,
+        older_than_seconds=older_than_seconds,
+        dry_run=not delete,
+    )
+    print(format_tmp_cleanup_result(result))
 
 
 def run_all_sources() -> None:

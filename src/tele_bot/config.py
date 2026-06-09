@@ -25,6 +25,11 @@ class Settings:
     max_download_retries: int
 
 
+def load_download_dir() -> Path:
+    load_dotenv()
+    return Path(os.getenv("DOWNLOAD_DIR", "./downloads")).expanduser().resolve()
+
+
 def load_settings() -> Settings:
     load_dotenv()
 
@@ -32,7 +37,7 @@ def load_settings() -> Settings:
     if not bot_token:
         raise RuntimeError("BOT_TOKEN is required")
 
-    download_dir = Path(os.getenv("DOWNLOAD_DIR", "./downloads")).expanduser().resolve()
+    download_dir = load_download_dir()
     db_path = Path(os.getenv("DB_PATH", "./data/bot.db")).expanduser().resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     download_dir.mkdir(parents=True, exist_ok=True)
