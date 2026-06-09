@@ -90,17 +90,17 @@ def parse_telethon_proxy(value: str | None) -> tuple | None:
         return None
 
     try:
-        import socks
+        import python_socks
     except ImportError as exc:
-        raise RuntimeError("TELETHON_PROXY requires the PySocks package") from exc
+        raise RuntimeError("TELETHON_PROXY requires the python-socks package") from exc
 
     parsed = urlparse(value.strip())
     proxy_types = {
-        "socks5": socks.SOCKS5,
-        "socks5h": socks.SOCKS5,
-        "socks4": socks.SOCKS4,
-        "http": socks.HTTP,
-        "https": socks.HTTP,
+        "socks5": python_socks.ProxyType.SOCKS5,
+        "socks5h": python_socks.ProxyType.SOCKS5,
+        "socks4": python_socks.ProxyType.SOCKS4,
+        "http": python_socks.ProxyType.HTTP,
+        "https": python_socks.ProxyType.HTTP,
     }
     proxy_type = proxy_types.get(parsed.scheme.lower())
     if proxy_type is None:

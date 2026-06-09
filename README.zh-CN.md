@@ -85,6 +85,8 @@ MAX_DOWNLOAD_RETRIES=3
 TELETHON_PROXY=socks5h://用户名:密码@代理地址:端口
 ```
 
+`TELETHON_PROXY` 依赖 `python-socks[asyncio]`，只影响 Saved Messages source。
+
 如果你不想启用配对，可以删掉 `PAIR_CODE`，并设置：
 
 ```env
