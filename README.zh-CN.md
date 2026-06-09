@@ -107,7 +107,24 @@ telegram-archiver bot
 ```bash
 telegram-archiver bot
 telegram-archiver saved
+telegram-archiver saved-stats
 telegram-archiver all
+```
+
+只统计 Saved Messages 待处理数量、不下载：
+
+```bash
+telegram-archiver saved-stats
+```
+
+如果 Docker 里的 `saved-archiver` 正在运行，要先停掉它再统计，因为 Telethon 同一个 session 文件不能被两个进程同时打开：
+
+```bash
+docker compose stop saved-archiver
+docker compose run --rm saved-archiver telegram-archiver saved-stats
+# 快速抽样：
+docker compose run --rm saved-archiver telegram-archiver saved-stats --limit 1000
+docker compose start saved-archiver
 ```
 
 ## Linux 部署

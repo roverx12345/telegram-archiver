@@ -9,7 +9,7 @@ import time
 from .bot import build_application
 from .config import load_settings
 from .db import Database
-from .saved_archiver import run_archiver
+from .saved_archiver import run_archiver, run_saved_stats
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -20,6 +20,9 @@ def main(argv: list[str] | None = None) -> None:
     subparsers = parser.add_subparsers(dest="source")
     subparsers.add_parser("bot", help="Run the forward-to-bot source.")
     subparsers.add_parser("saved", help="Run the Saved Messages source.")
+    saved_stats_parser = subparsers.add_parser("saved-stats", help="Scan Saved Messages and print download candidate counts.")
+    saved_stats_parser.add_argument("--limit", type=int, default=None, help="Only scan the newest N Saved Messages.")
+    saved_stats_parser.add_argument("--progress-every", type=int, default=1000, help="Log progress every N scanned messages.")
     subparsers.add_parser("all", help="Run both sources under one supervisor.")
     args = parser.parse_args(argv)
 
@@ -28,6 +31,8 @@ def main(argv: list[str] | None = None) -> None:
         run_bot_source()
     elif source == "saved":
         run_saved_source()
+    elif source == "saved-stats":
+        asyncio.run(run_saved_stats(limit=args.limit, progress_every=args.progress_every))
     elif source == "all":
         run_all_sources()
     else:  # pragma: no cover - argparse prevents this path.

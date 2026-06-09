@@ -10,6 +10,7 @@
 
 - `telegram-archiver bot` runs the forward-to-bot source.
 - `telegram-archiver saved` runs the Saved Messages source.
+- `telegram-archiver saved-stats` scans Saved Messages and prints download candidate counts without downloading. Use `--limit N` for a quick sample. Stop the running `saved-archiver` service first if it uses the same Telethon session.
 - `telegram-archiver all` runs both sources under one supervisor.
 
 ## Useful commands

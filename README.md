@@ -57,6 +57,7 @@ SAVED_ARCHIVE_EXISTING=true
 ```bash
 telegram-archiver bot
 telegram-archiver saved
+telegram-archiver saved-stats
 telegram-archiver all
 ```
 
@@ -67,6 +68,16 @@ DOWNLOAD_DIR/.tmp/*.part
 ```
 
 The bot source still retries failed downloads from the beginning.
+
+If Docker `saved-archiver` is already running, stop it before `saved-stats` because Telethon uses the same session file:
+
+```bash
+docker compose stop saved-archiver
+docker compose run --rm saved-archiver telegram-archiver saved-stats
+# quick sample:
+docker compose run --rm saved-archiver telegram-archiver saved-stats --limit 1000
+docker compose start saved-archiver
+```
 
 ## Detailed Guides
 

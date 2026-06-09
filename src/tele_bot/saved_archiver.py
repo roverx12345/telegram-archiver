@@ -5,6 +5,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,15 @@ class SavedArchiverSettings:
     archive_existing: bool
     blocked_forward_chat_ids: frozenset[int]
     proxy: tuple | None
+
+@dataclass(frozen=True)
+class SavedStats:
+    scanned_messages: int = 0
+    media_messages: int = 0
+    blocked_media: int = 0
+    already_archived_by_unique_id: int = 0
+    already_archived_by_file_id: int = 0
+    download_candidates: int = 0
 
 def load_saved_archiver_settings() -> SavedArchiverSettings:
     load_dotenv()
@@ -144,6 +154,108 @@ async def run_archiver() -> None:
         await client.run_until_disconnected()
 
     database.close()
+
+async def run_saved_stats(*, limit: int | None = None, progress_every: int = 1000) -> None:
+    settings = load_saved_archiver_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    database = Database(settings.db_path)
+    client = TelegramClient(
+        str(settings.session_path),
+        settings.api_id,
+        settings.api_hash,
+        proxy=settings.proxy,
+    )
+
+    try:
+        async with client:
+            stats = await collect_saved_stats(client, database, settings, limit=limit, progress_every=progress_every)
+            print(format_saved_stats(stats))
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower():
+            raise SystemExit(
+                "Saved Messages session is locked. Stop the saved-archiver service before running saved-stats."
+            ) from exc
+        raise
+    finally:
+        database.close()
+
+async def collect_saved_stats(
+    client: TelegramClient,
+    database: Database,
+    settings: SavedArchiverSettings,
+    *,
+    limit: int | None = None,
+    progress_every: int = 1000,
+) -> SavedStats:
+    stats = SavedStats()
+    async for message in client.iter_messages("me", limit=limit):
+        stats = SavedStats(
+            scanned_messages=stats.scanned_messages + 1,
+            media_messages=stats.media_messages,
+            blocked_media=stats.blocked_media,
+            already_archived_by_unique_id=stats.already_archived_by_unique_id,
+            already_archived_by_file_id=stats.already_archived_by_file_id,
+            download_candidates=stats.download_candidates,
+        )
+
+        if progress_every > 0 and stats.scanned_messages % progress_every == 0:
+            LOGGER.warning("Saved Messages stats progress: scanned=%s media=%s candidates=%s", stats.scanned_messages, stats.media_messages, stats.download_candidates)
+
+        ref = media_ref_from_message(message)
+        if ref is None:
+            continue
+
+        if is_blocked_forward_source(settings, message):
+            stats = add_saved_stats(stats, media_messages=1, blocked_media=1)
+            continue
+
+        if database.get_saved_by_unique_id(ref.file_unique_id) is not None:
+            stats = add_saved_stats(stats, media_messages=1, already_archived_by_unique_id=1)
+            continue
+
+        if database.get_saved_by_file_id(ref.file_id) is not None:
+            stats = add_saved_stats(stats, media_messages=1, already_archived_by_file_id=1)
+            continue
+
+        stats = add_saved_stats(stats, media_messages=1, download_candidates=1)
+
+    return stats
+
+def add_saved_stats(
+    stats: SavedStats,
+    *,
+    media_messages: int = 0,
+    blocked_media: int = 0,
+    already_archived_by_unique_id: int = 0,
+    already_archived_by_file_id: int = 0,
+    download_candidates: int = 0,
+) -> SavedStats:
+    return SavedStats(
+        scanned_messages=stats.scanned_messages,
+        media_messages=stats.media_messages + media_messages,
+        blocked_media=stats.blocked_media + blocked_media,
+        already_archived_by_unique_id=stats.already_archived_by_unique_id + already_archived_by_unique_id,
+        already_archived_by_file_id=stats.already_archived_by_file_id + already_archived_by_file_id,
+        download_candidates=stats.download_candidates + download_candidates,
+    )
+
+def format_saved_stats(stats: SavedStats) -> str:
+    already_archived = stats.already_archived_by_unique_id + stats.already_archived_by_file_id
+    lines = [
+        "Saved Messages stats",
+        f"scanned_messages={stats.scanned_messages}",
+        f"media_messages={stats.media_messages}",
+        f"blocked_media={stats.blocked_media}",
+        f"already_archived={already_archived}",
+        f"already_archived_by_unique_id={stats.already_archived_by_unique_id}",
+        f"already_archived_by_file_id={stats.already_archived_by_file_id}",
+        f"download_candidates={stats.download_candidates}",
+    ]
+    return "\n".join(lines)
 
 async def archive_message(
     client: TelegramClient,
