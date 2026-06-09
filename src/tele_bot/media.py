@@ -137,10 +137,37 @@ def build_storage_name(ref: MediaRef, sha256: str) -> str:
     return f"{stem}__{sha256[:12]}{ref.extension}"
 
 
+def media_storage_dir(download_dir: Path, media_type: str) -> Path:
+    folder_by_type = {
+        "photo": "photos",
+        "video": "videos",
+        "video_note": "videos",
+        "animation": "videos",
+        "audio": "audio",
+        "voice": "audio",
+        "document": "documents",
+        "sticker": "stickers",
+    }
+    return download_dir / folder_by_type.get(media_type, "other")
+
+
 def sanitize_filename(name: str) -> str:
     replaced = INVALID_FILENAME_CHARS.sub("_", name.strip())
     compact = re.sub(r"_+", "_", replaced).strip("._")
     return compact or "file"
+
+
+def unique_target_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    counter = 1
+    while True:
+        candidate = path.with_name(f"{stem}_{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def sha256sum(path: Path, chunk_size: int = 1024 * 1024) -> str:

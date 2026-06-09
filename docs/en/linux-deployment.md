@@ -1,6 +1,6 @@
 # Linux Deployment Guide
 
-This guide assumes Ubuntu or Debian and deploys the bot with `systemd`.
+This guide assumes Ubuntu or Debian and deploys the forward-to-bot source with `systemd`.
 
 ## 1. Install prerequisites
 
@@ -12,14 +12,14 @@ sudo apt install -y git python3 python3-venv python3-pip
 ## 2. Bootstrap the project
 
 ```bash
-git clone https://github.com/roverx12345/telegram-forward-archiver-bot.git /opt/telegram-forward-archiver-bot
-cd /opt/telegram-forward-archiver-bot
+git clone https://github.com/roverx12345/telegram-archiver.git /opt/telegram-archiver
+cd /opt/telegram-archiver
 bash deploy/linux/install.sh
 ```
 
 ## 3. Configure the bot
 
-Edit `/opt/telegram-forward-archiver-bot/.env` and set at least:
+Edit `/opt/telegram-archiver/.env` and set at least:
 
 ```env
 BOT_TOKEN=...
@@ -32,9 +32,9 @@ MAX_DOWNLOAD_RETRIES=3
 ## 4. Validate a manual start
 
 ```bash
-cd /opt/telegram-forward-archiver-bot
+cd /opt/telegram-archiver
 source .venv/bin/activate
-tele-bot
+telegram-archiver bot
 ```
 
 ## 5. Install the service
@@ -42,21 +42,21 @@ tele-bot
 Copy and adjust the template:
 
 ```bash
-sudo cp deploy/systemd/tele-bot.service /etc/systemd/system/tele-bot.service
-sudo nano /etc/systemd/system/tele-bot.service
+sudo cp deploy/systemd/telegram-archiver-bot.service /etc/systemd/system/telegram-archiver-bot.service
+sudo nano /etc/systemd/system/telegram-archiver-bot.service
 ```
 
 Update:
 
 - `User=telebot`
-- `WorkingDirectory=/opt/telegram-forward-archiver-bot`
-- `ExecStart=/opt/telegram-forward-archiver-bot/.venv/bin/tele-bot`
+- `WorkingDirectory=/opt/telegram-archiver`
+- `ExecStart=/opt/telegram-archiver/.venv/bin/telegram-archiver bot`
 
 Then enable it:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now tele-bot
-sudo systemctl status tele-bot
-journalctl -u tele-bot -f
+sudo systemctl enable --now telegram-archiver-bot
+sudo systemctl status telegram-archiver-bot
+journalctl -u telegram-archiver-bot -f
 ```

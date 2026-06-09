@@ -1,9 +1,14 @@
 # Docker Setup Guide
 
-There are now two Docker modes:
+Docker Compose runs the archiver as one application with two source services:
 
-- Base mode: bot only, suitable when you do not need large-file downloads.
-- Large-files mode: bot + local Telegram Bot API server, suitable for files above the cloud Bot API limit.
+- `bot`: forward-to-bot media archiving.
+- `saved-archiver`: Saved Messages archiving.
+
+There are also two Docker modes:
+
+- Base mode: official cloud Bot API.
+- Large-files mode: local Telegram Bot API server for files above the cloud Bot API limit.
 
 Files:
 
@@ -20,11 +25,13 @@ DB_PATH=./data/bot.db
 MAX_DOWNLOAD_RETRIES=3
 ```
 
-If you want large-file support, also add:
+If you want the Saved Messages source or large-file support, also add:
 
 ```env
 TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
+TELEGRAM_SESSION=./data/saved_messages.session
+SAVED_ARCHIVE_EXISTING=true
 ```
 
 ## 2. Start services
@@ -45,6 +52,7 @@ docker compose -f docker-compose.yml -f docker-compose.large-files.yml up -d --b
 
 ```bash
 docker compose logs -f bot
+docker compose logs -f saved-archiver
 ```
 
 If you use large-files mode:

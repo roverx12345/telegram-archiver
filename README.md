@@ -1,30 +1,36 @@
-# Telegram Forward Archiver Bot
+# Telegram Archiver
 
-Telegram bot for forwarded media archiving with dedupe, retry, and restart recovery.
+Archive Telegram media to local storage or NAS with dedupe, retry, and restart recovery.
+
+This is one archiver application with two source adapters:
+
+- `bot`: receives forwarded media in a private chat with a Telegram bot.
+- `saved`: scans and listens to your own Saved Messages with Telethon.
 
 [Read the Chinese documentation](./README.zh-CN.md)
 
 ## Features
 
-- Automatically downloads forwarded media sent to the bot in private chat.
-- Deduplicates by Telegram `file_unique_id` first, then by downloaded file `sha256`.
-- Supports pairing-based authorization with `/pair <code>`.
-- Auto-registers Telegram command menu, bot description, and `/help` on startup.
-- Persists download jobs and retries them after failures or restarts.
-- Preserves pending Telegram updates on restart.
-- Includes job inspection commands: `/status`, `/jobs`, `/failed`, `/retry_failed`.
-- Supports a local Telegram Bot API server for faster downloads.
+- Downloads forwarded media sent to the bot in private chat.
+- Archives existing and new Saved Messages media.
+- Resumes interrupted Saved Messages media downloads from `.part` files.
+- Deduplicates by Telegram file identity first, then by downloaded file `sha256`.
+- Stores shared metadata in one SQLite database.
+- Persists bot download jobs and retries them after failures or restarts.
+- Preserves pending Telegram bot updates on restart.
+- Includes bot job inspection commands: `/status`, `/jobs`, `/failed`, `/retry_failed`.
+- Supports a local Telegram Bot API server for faster bot downloads.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/roverx12345/telegram-forward-archiver-bot.git
-cd telegram-forward-archiver-bot
+git clone https://github.com/roverx12345/telegram-archiver.git
+cd telegram-archiver
 cp .env.example .env
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
-tele-bot
+telegram-archiver bot
 ```
 
 Set at least the following in `.env`:
@@ -37,6 +43,31 @@ DB_PATH=./data/bot.db
 MAX_DOWNLOAD_RETRIES=3
 ```
 
+For the Saved Messages source, also set:
+
+```env
+TELEGRAM_API_ID=...
+TELEGRAM_API_HASH=...
+TELEGRAM_SESSION=./data/saved_messages.session
+SAVED_ARCHIVE_EXISTING=true
+```
+
+## Run Modes
+
+```bash
+telegram-archiver bot
+telegram-archiver saved
+telegram-archiver all
+```
+
+Saved Messages downloads keep resumable partial files in:
+
+```text
+DOWNLOAD_DIR/.tmp/*.part
+```
+
+The bot source still retries failed downloads from the beginning.
+
 ## Detailed Guides
 
 - [Linux deployment with systemd](./docs/en/linux-deployment.md)
@@ -47,7 +78,7 @@ MAX_DOWNLOAD_RETRIES=3
 
 ## Included Templates
 
-- [systemd service template](./deploy/systemd/tele-bot.service)
+- [systemd service template](./deploy/systemd/telegram-archiver-bot.service)
 - [Linux bootstrap script](./deploy/linux/install.sh)
 - [GitHub Actions CI workflow](./.github/workflows/ci.yml)
 - [Base Docker Compose](./docker-compose.yml)

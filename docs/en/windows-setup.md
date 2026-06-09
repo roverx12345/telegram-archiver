@@ -8,8 +8,8 @@
 ## 2. Clone and install
 
 ```powershell
-git clone https://github.com/roverx12345/telegram-forward-archiver-bot.git
-cd telegram-forward-archiver-bot
+git clone https://github.com/roverx12345/telegram-archiver.git
+cd telegram-archiver
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
@@ -31,7 +31,7 @@ MAX_DOWNLOAD_RETRIES=3
 ## 4. Start the bot
 
 ```powershell
-.venv\Scripts\tele-bot.exe
+.venv\Scripts\telegram-archiver.exe bot
 ```
 
 If PowerShell blocks activation scripts:

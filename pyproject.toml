@@ -1,7 +1,7 @@
 [project]
-name = "tele-bot"
+name = "telegram-archiver"
 version = "0.1.0"
-description = "Telegram bot for forwarded media archiving with dedupe and pairing"
+description = "Telegram media archiver with bot and Saved Messages sources"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -17,8 +17,7 @@ dev = [
 ]
 
 [project.scripts]
-tele-bot = "tele_bot.main:main"
-tele-saved-archiver = "tele_bot.saved_archiver:main"
+telegram-archiver = "tele_bot.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

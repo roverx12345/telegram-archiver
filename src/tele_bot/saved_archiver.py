@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import mimetypes
 import os
@@ -14,7 +15,14 @@ from telethon import TelegramClient, events
 from telethon.tl.custom.message import Message
 
 from .db import Database
-from .media import MediaRef, build_storage_name, sanitize_filename, sha256sum
+from .media import (
+    MediaRef,
+    build_storage_name,
+    media_storage_dir,
+    sanitize_filename,
+    sha256sum,
+    unique_target_path,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -177,20 +185,13 @@ async def archive_message(
 
     temp_dir = settings.download_dir / ".tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_base = sanitize_filename(ref.file_name or ref.media_type)
-    if Path(temp_base).suffix.lower() == ref.extension.lower():
-        temp_name = f"saved_{message.id}_{temp_base}"
-    else:
-        temp_name = f"saved_{message.id}_{temp_base}{ref.extension}"
-    temp_path = unique_target_path(temp_dir / temp_name)
+    temp_path = resumable_temp_path(temp_dir, message.id, ref)
 
     try:
-        downloaded = await client.download_media(message, file=str(temp_path))
-        if downloaded is None:
-            LOGGER.info("Message %s has no downloadable media", message.id)
+        actual_temp_path = await download_media_resumable(client, message, ref, temp_path)
+        if actual_temp_path is None:
             return
 
-        actual_temp_path = Path(downloaded)
         sha256 = sha256sum(actual_temp_path)
         existing_by_hash = database.get_saved_by_sha256(sha256)
         if existing_by_hash is not None:
@@ -208,7 +209,9 @@ async def archive_message(
             return
 
         final_name = build_storage_name(ref, sha256)
-        final_path = unique_target_path(settings.download_dir / final_name)
+        target_dir = media_storage_dir(settings.download_dir, ref.media_type)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        final_path = unique_target_path(target_dir / final_name)
         actual_temp_path.replace(final_path)
 
         database.record_saved_file(
@@ -227,7 +230,7 @@ async def archive_message(
         record_message_metadata(database, message, ref, sha256, str(final_path))
         LOGGER.warning("Archived Saved Messages media: message=%s path=%s", message.id, final_path)
     except Exception:
-        temp_path.unlink(missing_ok=True)
+        # Keep the .part file so the next saved-source run can resume it.
         LOGGER.exception("Failed to archive Saved Messages media: message=%s", message.id)
 
 def is_blocked_forward_source(settings: SavedArchiverSettings, message: Message) -> bool:
@@ -236,6 +239,70 @@ def is_blocked_forward_source(settings: SavedArchiverSettings, message: Message)
         return False
     chat_id = getattr(forward, "chat_id", None)
     return chat_id in settings.blocked_forward_chat_ids
+
+def resumable_temp_path(temp_dir: Path, message_id: int, ref: MediaRef) -> Path:
+    digest = hashlib.sha256(ref.file_id.encode("utf-8")).hexdigest()[:16]
+    temp_base = sanitize_filename(ref.file_name or ref.media_type)
+    if Path(temp_base).suffix.lower() == ref.extension.lower():
+        display_name = temp_base
+    else:
+        display_name = f"{temp_base}{ref.extension}"
+    return temp_dir / f"saved_{message_id}_{digest}_{display_name}.part"
+
+async def download_media_resumable(
+    client: TelegramClient,
+    message: Message,
+    ref: MediaRef,
+    temp_path: Path,
+) -> Path | None:
+    expected_size = ref.file_size
+    existing_size = temp_path.stat().st_size if temp_path.exists() else 0
+
+    if expected_size is not None and existing_size > expected_size:
+        LOGGER.warning(
+            "Saved Messages partial file is larger than expected; restarting: message=%s path=%s",
+            message.id,
+            temp_path,
+        )
+        temp_path.unlink(missing_ok=True)
+        existing_size = 0
+
+    if expected_size is not None and existing_size == expected_size:
+        LOGGER.warning("Using complete partial file without re-download: message=%s path=%s", message.id, temp_path)
+        return temp_path
+
+    mode = "ab" if existing_size else "wb"
+    if existing_size:
+        LOGGER.warning(
+            "Resuming Saved Messages media download: message=%s offset=%s path=%s",
+            message.id,
+            existing_size,
+            temp_path,
+        )
+    else:
+        LOGGER.warning("Starting Saved Messages media download: message=%s path=%s", message.id, temp_path)
+
+    downloaded_any = False
+    with temp_path.open(mode) as handle:
+        async for chunk in client.iter_download(
+            message,
+            offset=existing_size,
+            file_size=expected_size,
+        ):
+            if not chunk:
+                continue
+            handle.write(chunk)
+            downloaded_any = True
+
+    final_size = temp_path.stat().st_size if temp_path.exists() else 0
+    if expected_size is not None and final_size != expected_size:
+        raise RuntimeError(f"incomplete download: expected {expected_size} bytes, got {final_size}")
+    if final_size == 0 and not downloaded_any:
+        LOGGER.info("Message %s has no downloadable media", message.id)
+        temp_path.unlink(missing_ok=True)
+        return None
+
+    return temp_path
 
 def archive_message_text(database: Database, settings: SavedArchiverSettings, message: Message) -> Path | None:
     text = getattr(message, "raw_text", None) or ""
@@ -364,18 +431,6 @@ def pick_extension(file_name: str | None, mime_type: str | None, default: str) -
             return guessed
     return default
 
-def unique_target_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    counter = 1
-    while True:
-        candidate = path.with_name(f"{stem}_{counter}{suffix}")
-        if not candidate.exists():
-            return candidate
-        counter += 1
-
 def record_message_metadata(
     database: Database,
     message: Message,
@@ -427,8 +482,5 @@ def describe_forward_source(message: Message) -> str | None:
         return f"chat:{chat_id}"
     return "forwarded"
 
-def main() -> None:
-    asyncio.run(run_archiver())
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(run_archiver())

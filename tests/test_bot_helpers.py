@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tele_bot.bot import build_help_text, bot_commands
+from tele_bot.bot import bot_commands, build_help_text
 from tele_bot.config import Settings
 
 

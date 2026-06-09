@@ -8,11 +8,19 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from .config import Settings
 from .db import Database, DownloadJob
-from .media import MediaRef, build_storage_name, extract_media_ref, is_forwarded_message, sha256sum
+from .media import (
+    MediaRef,
+    build_storage_name,
+    extract_media_ref,
+    is_forwarded_message,
+    media_storage_dir,
+    sha256sum,
+    unique_target_path,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-REPO_URL = "https://github.com/roverx12345/telegram-forward-archiver-bot"
+REPO_URL = "https://github.com/roverx12345/telegram-archiver"
 
 
 def build_application(settings: Settings, database: Database) -> Application:
@@ -298,7 +306,9 @@ async def process_download_job(
             return
 
         final_name = build_storage_name(media, sha256)
-        final_path = unique_target_path(settings.download_dir / final_name)
+        target_dir = media_storage_dir(settings.download_dir, media.media_type)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        final_path = unique_target_path(target_dir / final_name)
         temp_path.replace(final_path)
 
         database.record_saved_file(
@@ -380,19 +390,6 @@ def describe_forward_source(message) -> str | None:
     if getattr(message, "forward_from", None) is not None:
         return "user"
     return None
-
-
-def unique_target_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    counter = 1
-    while True:
-        candidate = path.with_name(f"{stem}_{counter}{suffix}")
-        if not candidate.exists():
-            return candidate
-        counter += 1
 
 
 def get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:

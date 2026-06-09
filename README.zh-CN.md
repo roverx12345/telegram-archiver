@@ -1,16 +1,25 @@
-# Telegram Forward Archiver Bot
+# Telegram Archiver
 
-这个项目实现了一个 Telegram bot，用来在私聊中接收“转发过来的媒体消息”，自动下载、去重并保存到本地。
+这个项目是一个 Telegram 媒体归档器，用来把 Telegram 媒体自动下载、去重并保存到本地或 NAS。
+
+它现在按“一个软件，两套 source”组织：
+
+- `bot`：Telegram Bot API source，处理私聊里转发给 bot 的媒体。
+- `saved`：Telethon Saved Messages source，扫描并监听你自己的 Saved Messages。
+
+两套 source 共用同一个数据库、下载目录、文件命名和去重逻辑；现有 `.env`、数据库和下载目录会继续沿用，不需要重新配置。
 
 ## 已实现需求
 
 1. 转发到 bot 的媒体会自动下载并保存。
-2. 不按文件名去重，优先使用 Telegram 的 `file_unique_id`，再用下载后的 `sha256` 做二次确认。
-3. 支持 `/pair <code>` 配对授权，避免任意知道 bot 用户名的人都能直接使用。
-4. 支持接入本地 Telegram Bot API server 来加速下载。
-5. bot 重启后会继续处理 Telegram 仍保留的积压消息，不会在启动时主动清空。
-6. 下载任务会落库保存，失败后可自动重试，异常重启后会继续恢复未完成任务。
-7. bot 启动时会自动注册 Telegram 命令菜单、简介和 `/help` 文档入口。
+2. Saved Messages 里的历史和新增媒体可以自动归档。
+3. Saved Messages 媒体下载中断后，会从 `.part` 半成品继续下载。
+4. 不按文件名去重，优先使用 Telegram 的文件标识，再用下载后的 `sha256` 做二次确认。
+5. 支持 `/pair <code>` 配对授权，避免任意知道 bot 用户名的人都能直接使用。
+6. 支持接入本地 Telegram Bot API server 来加速 bot source 下载。
+7. bot 重启后会继续处理 Telegram 仍保留的积压消息，不会在启动时主动清空。
+8. bot 下载任务会落库保存，失败后可自动重试，异常重启后会继续恢复未完成任务。
+9. bot 启动时会自动注册 Telegram 命令菜单、简介和 `/help` 文档入口。
 
 ## 方案说明
 
@@ -27,6 +36,22 @@
 - 下载失败会记为 `failed` 并记录错误原因。
 - bot 重启时会扫描 `pending / downloading / failed` 且未超过重试上限的任务，自动再次尝试下载。
 - 当前恢复是“重新下载整文件”，不是断点续传。
+
+### Saved Messages 断点续传
+
+- `telegram-archiver saved` 下载媒体时会写入 `DOWNLOAD_DIR/.tmp/*.part`。
+- 如果下载中断，`.part` 文件会保留。
+- 下次处理同一条 Saved Messages 媒体时，会从 `.part` 当前大小继续下载。
+- 下载完整后才会计算 `sha256`、去重、移动到最终分类目录。
+- `telegram-archiver bot` 仍然是失败后整文件重试，不做断点续传。
+
+### 两套 source 的关系
+
+- `telegram-archiver bot` 使用 Bot API，只处理私聊中转发给 bot 的媒体。
+- `telegram-archiver saved` 使用 Telethon 用户会话，处理 Saved Messages。
+- `telegram-archiver all` 会用一个 supervisor 同时启动两套 source。
+- 两套 source 都写入 `DB_PATH` 指向的同一个 SQLite 数据库，并保存到 `DOWNLOAD_DIR`。
+- 文件保存会按媒体类型放入 `photos / videos / audio / documents / stickers / other` 等目录。
 
 ### 为什么还要做配对
 
@@ -54,7 +79,7 @@ LOCAL_BOT_API_URL=http://telegram-bot-api:8081
 MAX_DOWNLOAD_RETRIES=3
 ```
 
-如果运行 `tele-saved-archiver` 下载 Saved Messages，可以让 Telethon 单独走 SOCKS5：
+如果运行 `telegram-archiver saved` 下载 Saved Messages，可以让 Telethon 单独走 SOCKS5：
 
 ```env
 TELETHON_PROXY=socks5h://用户名:密码@代理地址:端口
@@ -72,7 +97,15 @@ ALLOW_UNPAIRED_PRIVATE=true
 uv venv
 source .venv/bin/activate
 uv pip install -e '.[dev]'
-tele-bot
+telegram-archiver bot
+```
+
+可用启动方式：
+
+```bash
+telegram-archiver bot
+telegram-archiver saved
+telegram-archiver all
 ```
 
 ## Linux 部署
@@ -80,8 +113,8 @@ tele-bot
 建议在 Linux 上直接用 `systemd + Python venv` 部署，简单且稳定。
 
 ```bash
-git clone https://github.com/roverx12345/telegram-forward-archiver-bot.git /opt/telegram-forward-archiver-bot
-cd /opt/telegram-forward-archiver-bot
+git clone https://github.com/roverx12345/telegram-archiver.git /opt/telegram-archiver
+cd /opt/telegram-archiver
 cp .env.example .env
 python3 -m venv .venv
 source .venv/bin/activate
@@ -92,24 +125,24 @@ pip install -e '.[dev]'
 
 ```bash
 source .venv/bin/activate
-tele-bot
+telegram-archiver bot
 ```
 
-项目已提供 `systemd` 模板：[tele-bot.service](/Users/roverx/Documents/app/tele_bot/deploy/systemd/tele-bot.service)
+项目已提供 `systemd` 模板：[telegram-archiver-bot.service](./deploy/systemd/telegram-archiver-bot.service)
 
-把它复制到 `/etc/systemd/system/tele-bot.service` 后，根据你的实际 Linux 用户和部署目录修改这些字段：
+把它复制到 `/etc/systemd/system/telegram-archiver-bot.service` 后，根据你的实际 Linux 用户和部署目录修改这些字段：
 
 - `User=telebot`
-- `WorkingDirectory=/opt/telegram-forward-archiver-bot`
-- `ExecStart=/opt/telegram-forward-archiver-bot/.venv/bin/tele-bot`
+- `WorkingDirectory=/opt/telegram-archiver`
+- `ExecStart=/opt/telegram-archiver/.venv/bin/telegram-archiver bot`
 
 启用服务：
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now tele-bot
-sudo systemctl status tele-bot
-journalctl -u tele-bot -f
+sudo systemctl enable --now telegram-archiver-bot
+sudo systemctl status telegram-archiver-bot
+journalctl -u telegram-archiver-bot -f
 ```
 
 ## Windows 运行
@@ -117,8 +150,8 @@ journalctl -u tele-bot -f
 在 Windows 上建议直接运行 Python 版，不必额外折腾本地 Bot API server。
 
 ```powershell
-git clone https://github.com/roverx12345/telegram-forward-archiver-bot.git
-cd telegram-forward-archiver-bot
+git clone https://github.com/roverx12345/telegram-archiver.git
+cd telegram-archiver
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
@@ -140,7 +173,7 @@ MAX_DOWNLOAD_RETRIES=3
 启动命令：
 
 ```powershell
-.venv\Scripts\tele-bot.exe
+.venv\Scripts\telegram-archiver.exe bot
 ```
 
 如果 PowerShell 默认禁止脚本执行，可以先运行：
@@ -151,10 +184,15 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ## Docker Compose
 
-项目现在拆成两种 Docker 模式：
+项目现在默认启动两个 source：
 
-- 基础模式：只启动 bot，适合普通文件。
-- 大文件模式：额外启动本地 Bot API server，适合超过官方云端下载上限的文件。
+- `bot`：转发给 bot 的媒体归档。
+- `saved-archiver`：Saved Messages 归档。
+
+另外还有两种 Docker 模式：
+
+- 基础模式：使用官方云端 Bot API。
+- 大文件模式：额外启动本地 Bot API server，适合超过官方云端下载上限的 bot source 文件。
 
 基础模式：
 

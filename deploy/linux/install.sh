@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/roverx12345/telegram-forward-archiver-bot.git}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/telegram-forward-archiver-bot}"
+REPO_URL="${REPO_URL:-https://github.com/roverx12345/telegram-archiver.git}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/telegram-archiver}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-echo "Installing Telegram Forward Archiver Bot"
+echo "Installing Telegram Archiver"
 echo "Repository: ${REPO_URL}"
 echo "Install dir: ${INSTALL_DIR}"
 
@@ -41,5 +41,5 @@ echo
 echo "Bootstrap complete."
 echo "Next steps:"
 echo "1. Edit ${INSTALL_DIR}/.env"
-echo "2. Start manually with: ${INSTALL_DIR}/.venv/bin/tele-bot"
-echo "3. Or install deploy/systemd/tele-bot.service"
+echo "2. Start manually with: ${INSTALL_DIR}/.venv/bin/telegram-archiver bot"
+echo "3. Or install deploy/systemd/telegram-archiver-bot.service"

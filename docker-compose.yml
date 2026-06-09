@@ -5,6 +5,7 @@ services:
     env_file:
       - .env
     init: true
+    command: ["telegram-archiver", "bot"]
     volumes:
       - /srv/nas/nasdata/telegram-forward-archiver-bot/downloads:/app/downloads
       - ./data:/app/data
@@ -15,7 +16,7 @@ services:
     env_file:
       - .env
     init: true
-    command: ["tele-saved-archiver"]
+    command: ["telegram-archiver", "saved"]
     volumes:
       - /srv/nas/nasdata/telegram-forward-archiver-bot/downloads:/app/downloads
       - ./data:/app/data
