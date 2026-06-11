@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .env
+docker-compose.override.yml
 downloads/
 data/
 telegram-bot-api/

@@ -383,12 +383,39 @@ async def download_media_resumable(
         LOGGER.warning("Using complete partial file without re-download: message=%s path=%s", message.id, temp_path)
         return temp_path
 
-    mode = "ab" if existing_size else "wb"
-    if existing_size:
+    final_size, downloaded_any = await append_download(client, message, temp_path, existing_size, expected_size)
+    if expected_size is not None and final_size != expected_size and existing_size and final_size == existing_size:
+        LOGGER.warning(
+            "Saved Messages partial file made no progress; restarting from zero: message=%s path=%s",
+            message.id,
+            temp_path,
+        )
+        temp_path.unlink(missing_ok=True)
+        final_size, downloaded_any = await append_download(client, message, temp_path, 0, expected_size)
+
+    if expected_size is not None and final_size != expected_size:
+        raise RuntimeError(f"incomplete download: expected {expected_size} bytes, got {final_size}")
+    if final_size == 0 and not downloaded_any:
+        LOGGER.info("Message %s has no downloadable media", message.id)
+        temp_path.unlink(missing_ok=True)
+        return None
+
+    return temp_path
+
+
+async def append_download(
+    client: TelegramClient,
+    message: Message,
+    temp_path: Path,
+    offset: int,
+    expected_size: int | None,
+) -> tuple[int, bool]:
+    mode = "ab" if offset else "wb"
+    if offset:
         LOGGER.warning(
             "Resuming Saved Messages media download: message=%s offset=%s path=%s",
             message.id,
-            existing_size,
+            offset,
             temp_path,
         )
     else:
@@ -398,7 +425,7 @@ async def download_media_resumable(
     with temp_path.open(mode) as handle:
         async for chunk in client.iter_download(
             message,
-            offset=existing_size,
+            offset=offset,
             file_size=expected_size,
         ):
             if not chunk:
@@ -407,14 +434,7 @@ async def download_media_resumable(
             downloaded_any = True
 
     final_size = temp_path.stat().st_size if temp_path.exists() else 0
-    if expected_size is not None and final_size != expected_size:
-        raise RuntimeError(f"incomplete download: expected {expected_size} bytes, got {final_size}")
-    if final_size == 0 and not downloaded_any:
-        LOGGER.info("Message %s has no downloadable media", message.id)
-        temp_path.unlink(missing_ok=True)
-        return None
-
-    return temp_path
+    return final_size, downloaded_any
 
 def archive_message_text(database: Database, settings: SavedArchiverSettings, message: Message) -> Path | None:
     text = getattr(message, "raw_text", None) or ""
