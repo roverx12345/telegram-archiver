@@ -384,14 +384,20 @@ async def download_media_resumable(
         return temp_path
 
     final_size, downloaded_any = await append_download(client, message, temp_path, existing_size, expected_size)
-    if expected_size is not None and final_size != expected_size and existing_size and final_size == existing_size:
-        LOGGER.warning(
-            "Saved Messages partial file made no progress; restarting from zero: message=%s path=%s",
-            message.id,
+    if expected_size is not None and final_size != expected_size:
+        final_size, downloaded_any = await retry_incomplete_download(
+            client,
+            message,
             temp_path,
+            expected_size,
+            final_size,
+            downloaded_any,
+            force_restart=bool(existing_size and final_size == existing_size),
         )
-        temp_path.unlink(missing_ok=True)
-        final_size, downloaded_any = await append_download(client, message, temp_path, 0, expected_size)
+
+    if expected_size is not None and final_size != expected_size:
+        final_size, fallback_downloaded = await download_media_fallback(client, message, temp_path)
+        downloaded_any = downloaded_any or fallback_downloaded
 
     if expected_size is not None and final_size != expected_size:
         raise RuntimeError(f"incomplete download: expected {expected_size} bytes, got {final_size}")
@@ -435,6 +441,68 @@ async def append_download(
 
     final_size = temp_path.stat().st_size if temp_path.exists() else 0
     return final_size, downloaded_any
+
+
+async def retry_incomplete_download(
+    client: TelegramClient,
+    message: Message,
+    temp_path: Path,
+    expected_size: int,
+    final_size: int,
+    downloaded_any: bool,
+    *,
+    force_restart: bool,
+    attempts: int = 3,
+) -> tuple[int, bool]:
+    for attempt in range(1, attempts + 1):
+        if force_restart or final_size >= expected_size:
+            LOGGER.warning(
+                "Saved Messages partial file made no progress; restarting from zero: message=%s path=%s",
+                message.id,
+                temp_path,
+            )
+            temp_path.unlink(missing_ok=True)
+            offset = 0
+            force_restart = False
+        else:
+            offset = final_size
+
+        LOGGER.warning(
+            "Retrying incomplete Saved Messages media download: message=%s attempt=%s offset=%s expected=%s got=%s",
+            message.id,
+            attempt,
+            offset,
+            expected_size,
+            final_size,
+        )
+        final_size, retry_downloaded = await append_download(client, message, temp_path, offset, expected_size)
+        downloaded_any = downloaded_any or retry_downloaded
+        if final_size == expected_size:
+            break
+
+    return final_size, downloaded_any
+
+
+async def download_media_fallback(
+    client: TelegramClient,
+    message: Message,
+    temp_path: Path,
+) -> tuple[int, bool]:
+    LOGGER.warning(
+        "Falling back to full Telethon media download: message=%s path=%s",
+        message.id,
+        temp_path,
+    )
+    temp_path.unlink(missing_ok=True)
+    downloaded_path = await client.download_media(message, file=str(temp_path))
+    if downloaded_path is None:
+        return 0, False
+
+    actual_path = Path(downloaded_path)
+    if actual_path != temp_path and actual_path.exists():
+        actual_path.replace(temp_path)
+    final_size = temp_path.stat().st_size if temp_path.exists() else 0
+    return final_size, final_size > 0
 
 def archive_message_text(database: Database, settings: SavedArchiverSettings, message: Message) -> Path | None:
     text = getattr(message, "raw_text", None) or ""
