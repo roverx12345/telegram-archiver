@@ -652,6 +652,8 @@ async def run_channel_archiver() -> None:
             if not entities:
                 raise RuntimeError("no usable channels configured")
 
+            channel_media_dirs = channel_storage_roots(settings.download_dir, entities)
+            channel_text_dirs = channel_storage_roots(settings.text_dir, entities)
             archive_lock = asyncio.Lock()
 
             async def archive_one(message: Message) -> None:
@@ -663,7 +665,8 @@ async def run_channel_archiver() -> None:
                             message.id,
                         )
                         return
-                    source_key = f"channel_{normalized_channel_id(getattr(message, 'chat_id', None))}"
+                    channel_id = normalized_channel_id(getattr(message, "chat_id", None))
+                    source_key = f"channel_{channel_id}"
                     await archive_message(
                         client,
                         database,
@@ -676,6 +679,8 @@ async def run_channel_archiver() -> None:
                         allowed_extensions=channel_settings.allowed_extensions,
                         password_file=channel_settings.password_file,
                         strip_archive_passwords=channel_settings.strip_archive_passwords,
+                        media_root_dir=channel_media_dirs.get(channel_id),
+                        text_root_dir=channel_text_dirs.get(channel_id),
                     )
 
             @client.on(events.NewMessage(chats=entities))
@@ -929,6 +934,29 @@ def channel_info_from_entity(entity: object) -> ChannelInfo:
     )
 
 
+def channel_storage_roots(root_dir: Path, entities: list[object]) -> dict[int, Path]:
+    channel_ids: list[int] = []
+    base_names: dict[int, str] = {}
+    name_counts: dict[str, int] = {}
+    for entity in entities:
+        channel_id = normalized_channel_id(getattr(entity, "id", None))
+        if channel_id == 0:
+            continue
+        base_name = sanitize_filename(display_peer_title(entity))
+        channel_ids.append(channel_id)
+        base_names[channel_id] = base_name
+        name_counts[base_name.lower()] = name_counts.get(base_name.lower(), 0) + 1
+
+    roots: dict[int, Path] = {}
+    for channel_id in channel_ids:
+        base_name = base_names[channel_id]
+        folder_name = base_name
+        if name_counts[base_name.lower()] > 1:
+            folder_name = f"{base_name}_{channel_id}"
+        roots[channel_id] = root_dir / folder_name
+    return roots
+
+
 async def resolve_channel_entity(client: TelegramClient, peer: str) -> object:
     try:
         return await client.get_entity(peer)
@@ -1113,6 +1141,8 @@ async def archive_message(
     allowed_extensions: frozenset[str] = frozenset(),
     password_file: Path | None = None,
     strip_archive_passwords: bool = False,
+    media_root_dir: Path | None = None,
+    text_root_dir: Path | None = None,
 ) -> None:
     ref = media_ref_from_message(message, source_key=source_key)
     source = archive_source_name(source_key)
@@ -1125,7 +1155,14 @@ async def archive_message(
         return
 
     if archive_text:
-        archive_message_text(database, settings, message, source_key=source_key, log_label=log_label)
+        archive_message_text(
+            database,
+            settings,
+            message,
+            source_key=source_key,
+            log_label=log_label,
+            text_root_dir=text_root_dir,
+        )
     if ref is None:
         return
 
@@ -1191,7 +1228,8 @@ async def archive_message(
             return
 
         final_name = build_storage_name(processed_ref, sha256)
-        target_dir = media_storage_dir(settings.download_dir, processed_ref.media_type)
+        target_root = media_root_dir or settings.download_dir
+        target_dir = media_storage_dir(target_root, processed_ref.media_type)
         target_dir.mkdir(parents=True, exist_ok=True)
         final_path = unique_target_path(target_dir / final_name)
         processed_temp_path.replace(final_path)
@@ -1573,19 +1611,22 @@ def archive_message_text(
     *,
     source_key: str = "saved",
     log_label: str = "Saved Messages",
+    text_root_dir: Path | None = None,
 ) -> Path | None:
     text = getattr(message, "raw_text", None) or ""
     if not text.strip():
         return None
 
     body = build_text_archive_body(message, text)
+    target_root = text_root_dir or settings.text_dir
+    target_root.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
             newline="\n",
-            dir=settings.text_dir,
+            dir=target_root,
             prefix=f"{sanitize_filename(source_key)}_{message.id}_",
             suffix=".tmp",
             delete=False,
@@ -1601,7 +1642,7 @@ def archive_message_text(
             return Path(existing.final_path)
 
         final_name = f"{sanitize_filename(source_key)}_{message.id}__{sha256[:12]}.txt"
-        final_path = unique_target_path(settings.text_dir / final_name)
+        final_path = unique_target_path(target_root / final_name)
         temp_path.replace(final_path)
 
         try:

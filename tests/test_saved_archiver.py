@@ -15,6 +15,7 @@ from tele_bot.saved_archiver import (
     archive_message,
     classify_archive_exception,
     channel_partial_message_refs,
+    channel_storage_roots,
     download_media_resumable,
     format_channel_check_result,
     format_channel_list,
@@ -111,6 +112,18 @@ def test_format_channel_list() -> None:
     assert "username=@example" in text
     assert "flags=broadcast,protected" in text
     assert "title=Example Channel" in text
+
+
+def test_channel_storage_roots_use_sanitized_channel_titles(tmp_path: Path) -> None:
+    first = type("Channel", (), {"id": 123, "title": "Example/Channel"})()
+    duplicate = type("Channel", (), {"id": 456, "title": "Example:Channel"})()
+    unique = type("Channel", (), {"id": 789, "title": "Other"})()
+
+    roots = channel_storage_roots(tmp_path, [first, duplicate, unique])
+
+    assert roots[123] == tmp_path / "Example_Channel_123"
+    assert roots[456] == tmp_path / "Example_Channel_456"
+    assert roots[789] == tmp_path / "Other"
 
 
 def test_parse_channel_peer_id_accepts_listed_and_full_ids() -> None:
@@ -547,6 +560,44 @@ async def test_archive_message_moves_final_file_back_to_part_when_database_fails
     temp_path = resumable_temp_path(settings.download_dir / ".tmp", message.id, ref)
     assert temp_path.read_bytes() == b"complete"
     assert list((settings.download_dir / "documents").glob("*.bin")) == []
+
+
+@pytest.mark.anyio
+async def test_archive_message_can_store_media_under_channel_root(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.db")
+    settings = saved_settings(tmp_path)
+    message = type("Message", (), {"id": 123, "chat_id": -100456, "text": "", "raw_text": ""})()
+    message.media = object()
+    message.file = type(
+        "File",
+        (),
+        {"name": "media.bin", "size": len(b"complete"), "mime_type": "application/octet-stream"},
+    )()
+    message.document = type(
+        "Document",
+        (),
+        {
+            "id": "file",
+            "file_reference": b"ref",
+            "size": len(b"complete"),
+            "mime_type": "application/octet-stream",
+            "attributes": [],
+        },
+    )()
+
+    await archive_message(
+        DownloadCompleteClient(),
+        database,
+        settings,
+        message,
+        source_key="channel_456",
+        media_root_dir=tmp_path / "downloads" / "Example Channel",
+    )
+
+    assert list((settings.download_dir / "documents").glob("*.bin")) == []
+    files = list((settings.download_dir / "Example Channel" / "documents").glob("*.bin"))
+    assert len(files) == 1
+    assert files[0].read_bytes() == b"complete"
 
 
 
