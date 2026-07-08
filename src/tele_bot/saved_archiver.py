@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -12,6 +13,7 @@ import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, time, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -136,14 +138,31 @@ class ChannelCheckResult:
     sample_download_detail: str
 
 @dataclass(frozen=True)
+class ChannelTargetSettings:
+    peer: str
+    allowed_extensions: frozenset[str]
+    media_types: frozenset[str]
+    archive_text: bool
+    try_protected_content: bool
+    download_dir: Path | None
+    text_dir: Path | None
+    archive_existing: bool
+    existing_scan_limit: int
+    recent_scan_limit: int
+    start_date: datetime | None
+    end_date: datetime | None
+    download_delay_seconds: float
+
+@dataclass(frozen=True)
 class ChannelArchiverSettings:
     archive: SavedArchiverSettings
-    peers: tuple[str, ...]
-    allowed_extensions: frozenset[str]
-    archive_text: bool
+    targets: tuple[ChannelTargetSettings, ...]
     password_file: Path | None
     strip_archive_passwords: bool
-    try_protected_content: bool
+
+    @property
+    def peers(self) -> tuple[str, ...]:
+        return tuple(target.peer for target in self.targets)
 
 def load_saved_archiver_settings() -> SavedArchiverSettings:
     load_dotenv()
@@ -211,10 +230,6 @@ def load_channel_archiver_settings() -> ChannelArchiverSettings:
     if not api_id_raw or not api_hash:
         raise RuntimeError("TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
 
-    peers = parse_peer_list(os.getenv("CHANNEL_ARCHIVE_PEERS"))
-    if not peers:
-        raise RuntimeError("CHANNEL_ARCHIVE_PEERS is required for telegram-archiver channels")
-
     download_dir = Path(os.getenv("DOWNLOAD_DIR", "./downloads")).expanduser().resolve()
     text_dir = Path(os.getenv("TEXT_DOWNLOAD_DIR", str(download_dir / "texts"))).expanduser().resolve()
     db_path = Path(os.getenv("DB_PATH", "./data/bot.db")).expanduser().resolve()
@@ -246,14 +261,35 @@ def load_channel_archiver_settings() -> ChannelArchiverSettings:
     )
     password_file_raw = os.getenv("CHANNEL_ARCHIVE_PASSWORD_FILE", "").strip()
     password_file = Path(password_file_raw).expanduser().resolve() if password_file_raw else None
+    default_target = ChannelTargetSettings(
+        peer="",
+        allowed_extensions=parse_extension_set(os.getenv("CHANNEL_ARCHIVE_EXTENSIONS")),
+        media_types=parse_keyword_set(os.getenv("CHANNEL_ARCHIVE_MEDIA_TYPES")),
+        archive_text=_to_bool(os.getenv("CHANNEL_ARCHIVE_TEXT"), default=True),
+        try_protected_content=_to_bool(os.getenv("CHANNEL_TRY_PROTECTED_CONTENT"), default=False),
+        download_dir=None,
+        text_dir=None,
+        archive_existing=archive.archive_existing,
+        existing_scan_limit=max(0, int(os.getenv("CHANNEL_EXISTING_SCAN_LIMIT", "0"))),
+        recent_scan_limit=archive.recent_scan_limit,
+        start_date=parse_config_datetime(os.getenv("CHANNEL_START_DATE"), end_of_day=False),
+        end_date=parse_config_datetime(os.getenv("CHANNEL_END_DATE"), end_of_day=True),
+        download_delay_seconds=max(0.0, float(os.getenv("CHANNEL_DOWNLOAD_DELAY_SECONDS", "0"))),
+    )
+    config_path_raw = os.getenv("CHANNEL_ARCHIVE_CONFIG", "").strip()
+    if config_path_raw:
+        targets = load_channel_target_config(Path(config_path_raw).expanduser().resolve(), default_target)
+    else:
+        peers = parse_peer_list(os.getenv("CHANNEL_ARCHIVE_PEERS"))
+        if not peers:
+            raise RuntimeError("CHANNEL_ARCHIVE_PEERS or CHANNEL_ARCHIVE_CONFIG is required for telegram-archiver channels")
+        targets = tuple(channel_target_with_peer(default_target, peer) for peer in peers)
+
     return ChannelArchiverSettings(
         archive=archive,
-        peers=peers,
-        allowed_extensions=parse_extension_set(os.getenv("CHANNEL_ARCHIVE_EXTENSIONS")),
-        archive_text=_to_bool(os.getenv("CHANNEL_ARCHIVE_TEXT"), default=True),
+        targets=targets,
         password_file=password_file,
         strip_archive_passwords=_to_bool(os.getenv("CHANNEL_STRIP_ARCHIVE_PASSWORDS"), default=False),
-        try_protected_content=_to_bool(os.getenv("CHANNEL_TRY_PROTECTED_CONTENT"), default=False),
     )
 
 
@@ -297,6 +333,125 @@ def parse_extension_set(value: str | None) -> frozenset[str]:
             item = f".{item}"
         extensions.add(item)
     return frozenset(extensions)
+
+
+def parse_config_extension_set(value: object, default: frozenset[str]) -> frozenset[str]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return parse_extension_set(value)
+    if isinstance(value, list):
+        return parse_extension_set(",".join(str(item) for item in value))
+    raise RuntimeError("channel config extensions must be a string or list")
+
+
+def parse_config_keyword_set(value: object, default: frozenset[str]) -> frozenset[str]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return parse_keyword_set(value)
+    if isinstance(value, list):
+        return frozenset(str(item).strip().casefold() for item in value if str(item).strip())
+    raise RuntimeError("channel config media_types must be a string or list")
+
+
+def parse_config_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _to_bool(value, default=default)
+    raise RuntimeError("channel config boolean values must be bool or string")
+
+
+def parse_config_int(value: object, default: int) -> int:
+    if value is None:
+        return default
+    return max(0, int(value))
+
+
+def parse_config_float(value: object, default: float) -> float:
+    if value is None:
+        return default
+    return max(0.0, float(value))
+
+
+def parse_config_path(value: object) -> Path | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return Path(str(value)).expanduser().resolve()
+
+
+def parse_config_datetime(value: object, *, end_of_day: bool) -> datetime | None:
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        parsed_date = datetime.fromisoformat(text).date()
+        parsed = datetime.combine(parsed_date, time.max if end_of_day else time.min, tzinfo=timezone.utc)
+    else:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def channel_target_with_peer(target: ChannelTargetSettings, peer: str) -> ChannelTargetSettings:
+    return ChannelTargetSettings(
+        peer=peer,
+        allowed_extensions=target.allowed_extensions,
+        media_types=target.media_types,
+        archive_text=target.archive_text,
+        try_protected_content=target.try_protected_content,
+        download_dir=target.download_dir,
+        text_dir=target.text_dir,
+        archive_existing=target.archive_existing,
+        existing_scan_limit=target.existing_scan_limit,
+        recent_scan_limit=target.recent_scan_limit,
+        start_date=target.start_date,
+        end_date=target.end_date,
+        download_delay_seconds=target.download_delay_seconds,
+    )
+
+
+def load_channel_target_config(path: Path, default: ChannelTargetSettings) -> tuple[ChannelTargetSettings, ...]:
+    if not path.exists():
+        raise RuntimeError(f"CHANNEL_ARCHIVE_CONFIG does not exist: {path}")
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get("channels"), list):
+        raise RuntimeError("CHANNEL_ARCHIVE_CONFIG must be a JSON object with a channels list")
+
+    targets: list[ChannelTargetSettings] = []
+    for item in data["channels"]:
+        if not isinstance(item, dict):
+            raise RuntimeError("each channel config entry must be an object")
+        peer = str(item.get("peer", "")).strip()
+        if not peer:
+            raise RuntimeError("each channel config entry requires peer")
+        targets.append(
+            ChannelTargetSettings(
+                peer=peer,
+                allowed_extensions=parse_config_extension_set(item.get("extensions"), default.allowed_extensions),
+                media_types=parse_config_keyword_set(item.get("media_types"), default.media_types),
+                archive_text=parse_config_bool(item.get("archive_text"), default.archive_text),
+                try_protected_content=parse_config_bool(item.get("try_protected_content"), default.try_protected_content),
+                download_dir=parse_config_path(item.get("download_dir")) or default.download_dir,
+                text_dir=parse_config_path(item.get("text_dir")) or default.text_dir,
+                archive_existing=parse_config_bool(item.get("archive_existing"), default.archive_existing),
+                existing_scan_limit=parse_config_int(item.get("existing_limit"), default.existing_scan_limit),
+                recent_scan_limit=parse_config_int(item.get("recent_limit"), default.recent_scan_limit),
+                start_date=parse_config_datetime(item.get("start_date"), end_of_day=False) or default.start_date,
+                end_date=parse_config_datetime(item.get("end_date"), end_of_day=True) or default.end_date,
+                download_delay_seconds=parse_config_float(item.get("download_delay_seconds"), default.download_delay_seconds),
+            )
+        )
+    if not targets:
+        raise RuntimeError("CHANNEL_ARCHIVE_CONFIG channels list must not be empty")
+    return tuple(targets)
+
 
 def parse_telethon_proxy(value: str | None) -> tuple | None:
     if not value or not value.strip():
@@ -462,15 +617,21 @@ async def scan_existing_channel_messages(
     entity: object,
     *,
     archive_one: Callable[[Message], Awaitable[None]],
+    limit: int = 0,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
 ) -> None:
     info = channel_info_from_entity(entity)
-    LOGGER.warning("Scanning existing channel media: peer=%s title=%s", full_channel_peer_id(info.id), info.title)
+    LOGGER.warning("Scanning existing channel media: peer=%s title=%s limit=%s", full_channel_peer_id(info.id), info.title, limit)
     scanned = 0
     async for message in client.iter_messages(entity, reverse=True):
         scanned += 1
-        await archive_one(message)
+        if message_in_date_range(message, start_date=start_date, end_date=end_date):
+            await archive_one(message)
         if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
             LOGGER.warning("Channel scan progress: peer=%s scanned=%s", full_channel_peer_id(info.id), scanned)
+        if limit > 0 and scanned >= limit:
+            break
     LOGGER.warning("Existing channel scan finished: peer=%s scanned=%s", full_channel_peer_id(info.id), scanned)
 
 
@@ -481,6 +642,8 @@ async def scan_recent_channel_messages(
     *,
     limit: int,
     archive_one: Callable[[Message], Awaitable[None]],
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
 ) -> None:
     if limit <= 0:
         return
@@ -490,7 +653,8 @@ async def scan_recent_channel_messages(
     scanned = 0
     async for message in client.iter_messages(entity, limit=limit):
         scanned += 1
-        await archive_one(message)
+        if message_in_date_range(message, start_date=start_date, end_date=end_date):
+            await archive_one(message)
         if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
             LOGGER.warning(
                 "Recent channel scan progress: peer=%s scanned=%s limit=%s",
@@ -562,6 +726,7 @@ async def periodic_channel_recent_scan_loop(
     client: TelegramClient,
     settings: SavedArchiverSettings,
     entities: list[object],
+    targets_by_id: dict[int, ChannelTargetSettings],
     *,
     archive_one: Callable[[Message], Awaitable[None]],
 ) -> None:
@@ -569,17 +734,41 @@ async def periodic_channel_recent_scan_loop(
         await asyncio.sleep(settings.recent_scan_interval_seconds)
         for entity in entities:
             try:
+                channel_id = normalized_channel_id(getattr(entity, "id", None))
+                target = targets_by_id.get(channel_id)
+                if target is None or target.recent_scan_limit <= 0:
+                    continue
                 await scan_recent_channel_messages(
                     client,
                     settings,
                     entity,
-                    limit=settings.recent_scan_limit,
+                    limit=target.recent_scan_limit,
                     archive_one=archive_one,
+                    start_date=target.start_date,
+                    end_date=target.end_date,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 LOGGER.exception("Periodic channel recent scan failed: peer=%s", full_channel_peer_id(getattr(entity, "id", None)))
+
+
+def message_in_date_range(
+    message: Message,
+    *,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+) -> bool:
+    message_date = getattr(message, "date", None)
+    if message_date is None:
+        return True
+    if message_date.tzinfo is None:
+        message_date = message_date.replace(tzinfo=timezone.utc)
+    if start_date is not None and message_date < start_date:
+        return False
+    if end_date is not None and message_date > end_date:
+        return False
+    return True
 
 
 async def run_archiver() -> None:
@@ -663,11 +852,16 @@ async def run_channel_archiver() -> None:
             me = await client.get_me()
             LOGGER.warning("Channel archiver started for account id=%s", getattr(me, "id", "unknown"))
             entities: list[object] = []
-            for peer in channel_settings.peers:
-                entity = await resolve_channel_entity(client, peer)
+            targets_by_id: dict[int, ChannelTargetSettings] = {}
+            for target in channel_settings.targets:
+                entity = await resolve_channel_entity(client, target.peer)
                 info = channel_info_from_entity(entity)
-                if info.protected_content and not channel_settings.try_protected_content:
-                    LOGGER.warning("Protected channel skipped: peer=%s title=%s", peer, info.title)
+                if info.protected_content and not target.try_protected_content:
+                    LOGGER.warning("Protected channel skipped: peer=%s title=%s", target.peer, info.title)
+                    continue
+                channel_id = normalized_channel_id(info.id)
+                if channel_id == 0:
+                    LOGGER.warning("Channel skipped because id is unknown: peer=%s title=%s", target.peer, info.title)
                     continue
                 if info.protected_content:
                     LOGGER.warning(
@@ -678,17 +872,31 @@ async def run_channel_archiver() -> None:
                 else:
                     LOGGER.warning("Configured channel: peer=%s title=%s", full_channel_peer_id(info.id), info.title)
                 entities.append(entity)
+                targets_by_id[channel_id] = target
 
             if not entities:
                 raise RuntimeError("no usable channels configured")
 
-            channel_media_dirs = channel_storage_roots(settings.download_dir, entities)
-            channel_text_dirs = channel_storage_roots(settings.text_dir, entities)
+            channel_media_dirs = {
+                channel_id: (target.download_dir or settings.download_dir) / channel_storage_folder_name(channel_id)
+                for channel_id, target in targets_by_id.items()
+            }
+            channel_text_dirs = {
+                channel_id: (target.text_dir or settings.text_dir) / channel_storage_folder_name(channel_id)
+                for channel_id, target in targets_by_id.items()
+            }
             archive_lock = asyncio.Lock()
 
             async def archive_one(message: Message) -> None:
                 async with archive_lock:
-                    if has_protected_content(message) and not channel_settings.try_protected_content:
+                    channel_id = normalized_channel_id(getattr(message, "chat_id", None))
+                    target = targets_by_id.get(channel_id)
+                    if target is None:
+                        LOGGER.warning("Channel message skipped because peer is not configured: chat=%s message=%s", getattr(message, "chat_id", None), message.id)
+                        return
+                    if not message_in_date_range(message, start_date=target.start_date, end_date=target.end_date):
+                        return
+                    if has_protected_content(message) and not target.try_protected_content:
                         LOGGER.warning(
                             "Protected channel message skipped: chat=%s message=%s",
                             getattr(message, "chat_id", None),
@@ -701,7 +909,6 @@ async def run_channel_archiver() -> None:
                             getattr(message, "chat_id", None),
                             message.id,
                         )
-                    channel_id = normalized_channel_id(getattr(message, "chat_id", None))
                     source_key = f"channel_{channel_id}"
                     await archive_message(
                         client,
@@ -711,22 +918,25 @@ async def run_channel_archiver() -> None:
                         source_key=source_key,
                         log_label="Channel",
                         apply_saved_blocks=False,
-                        archive_text=channel_settings.archive_text,
-                        allowed_extensions=channel_settings.allowed_extensions,
+                        archive_text=target.archive_text,
+                        allowed_extensions=target.allowed_extensions,
+                        allowed_media_types=target.media_types,
                         password_file=channel_settings.password_file,
                         strip_archive_passwords=channel_settings.strip_archive_passwords,
                         media_root_dir=channel_media_dirs.get(channel_id),
                         text_root_dir=channel_text_dirs.get(channel_id),
                     )
+                    if target.download_delay_seconds > 0:
+                        await asyncio.sleep(target.download_delay_seconds)
 
             @client.on(events.NewMessage(chats=entities))
             async def handle_channel_message(event: events.NewMessage.Event) -> None:
                 await archive_one(event.message)
 
             periodic_task: asyncio.Task[None] | None = None
-            if settings.recent_scan_interval_seconds > 0 and settings.recent_scan_limit > 0:
+            if settings.recent_scan_interval_seconds > 0 and any(target.recent_scan_limit > 0 for target in targets_by_id.values()):
                 periodic_task = asyncio.create_task(
-                    periodic_channel_recent_scan_loop(client, settings, entities, archive_one=archive_one)
+                    periodic_channel_recent_scan_loop(client, settings, entities, targets_by_id, archive_one=archive_one)
                 )
                 LOGGER.warning(
                     "Periodic channel recent scan enabled: interval_seconds=%s limit=%s",
@@ -741,9 +951,20 @@ async def run_channel_archiver() -> None:
                     if getattr(entity, "id", None) is not None
                 }
                 await retry_partial_channel_messages(client, settings, entities_by_id, archive_one=archive_one)
-            if settings.archive_existing:
-                for entity in entities:
-                    await scan_existing_channel_messages(client, database, settings, entity, archive_one=archive_one)
+            for entity in entities:
+                channel_id = normalized_channel_id(getattr(entity, "id", None))
+                target = targets_by_id.get(channel_id)
+                if target is not None and target.archive_existing:
+                    await scan_existing_channel_messages(
+                        client,
+                        database,
+                        settings,
+                        entity,
+                        archive_one=archive_one,
+                        limit=target.existing_scan_limit,
+                        start_date=target.start_date,
+                        end_date=target.end_date,
+                    )
 
             LOGGER.warning("Listening for new channel media")
             try:
@@ -1169,6 +1390,7 @@ async def archive_message(
     apply_saved_blocks: bool = True,
     archive_text: bool = True,
     allowed_extensions: frozenset[str] = frozenset(),
+    allowed_media_types: frozenset[str] = frozenset(),
     password_file: Path | None = None,
     strip_archive_passwords: bool = False,
     media_root_dir: Path | None = None,
@@ -1178,6 +1400,10 @@ async def archive_message(
     source = archive_source_name(source_key)
     if apply_saved_blocks and is_blocked_saved_message(settings, message, ref):
         LOGGER.warning("Blocked %s item skipped: message=%s", log_label, message.id)
+        return
+
+    if ref is not None and allowed_media_types and ref.media_type.casefold() not in allowed_media_types:
+        LOGGER.info("Skipped %s media outside allowed media types: message=%s type=%s", log_label, message.id, ref.media_type)
         return
 
     if ref is not None and allowed_extensions and not media_ref_matches_extensions(ref, allowed_extensions):

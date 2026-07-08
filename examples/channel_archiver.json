@@ -1,0 +1,33 @@
+{
+  "channels": [
+    {
+      "peer": "-1002683725559",
+      "extensions": "archives",
+      "archive_text": false
+    },
+    {
+      "peer": "-1003018373376",
+      "media_types": [
+        "video",
+        "animation",
+        "video_note"
+      ],
+      "extensions": [
+        ".mp4",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".m4v",
+        ".avi",
+        ".flv",
+        ".wmv",
+        ".ts"
+      ],
+      "archive_text": false,
+      "try_protected_content": true,
+      "existing_limit": 0,
+      "recent_limit": 2000,
+      "download_delay_seconds": 0.5
+    }
+  ]
+}

@@ -1,6 +1,8 @@
+import json
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,7 @@ from tele_bot.saved_archiver import (
     has_protected_content,
     load_channel_archiver_settings,
     is_blocked_saved_message,
+    message_in_date_range,
     media_ref_from_message,
     media_ref_matches_extensions,
     maybe_strip_archive_password,
@@ -332,9 +335,69 @@ def test_load_channel_archiver_settings_try_protected_flag(monkeypatch: pytest.M
     monkeypatch.setenv("CHANNEL_TELEGRAM_SESSION", str(tmp_path / "channel.session"))
     monkeypatch.setenv("CHANNEL_TRY_PROTECTED_CONTENT", "true")
 
+    monkeypatch.setenv("CHANNEL_ARCHIVE_CONFIG", "")
+
     settings = load_channel_archiver_settings()
 
-    assert settings.try_protected_content is True
+    assert settings.peers == ("-1003018373376",)
+    assert settings.targets[0].try_protected_content is True
+
+
+def test_load_channel_archiver_settings_config_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "channels.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "channels": [
+                    {
+                        "peer": "-1003018373376",
+                        "media_types": ["video", "animation"],
+                        "extensions": [".mp4", ".mkv"],
+                        "archive_text": False,
+                        "try_protected_content": True,
+                        "existing_limit": 100,
+                        "recent_limit": 25,
+                        "start_date": "2026-07-01",
+                        "end_date": "2026-07-09T23:00:00+00:00",
+                        "download_delay_seconds": 1.5,
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("CHANNEL_ARCHIVE_CONFIG", str(config_path))
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "downloads"))
+    monkeypatch.setenv("TEXT_DOWNLOAD_DIR", str(tmp_path / "texts"))
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "bot.db"))
+    monkeypatch.setenv("CHANNEL_TELEGRAM_SESSION", str(tmp_path / "channel.session"))
+
+    settings = load_channel_archiver_settings()
+    target = settings.targets[0]
+
+    assert settings.peers == ("-1003018373376",)
+    assert target.media_types == frozenset({"video", "animation"})
+    assert target.allowed_extensions == frozenset({".mp4", ".mkv"})
+    assert target.archive_text is False
+    assert target.try_protected_content is True
+    assert target.existing_scan_limit == 100
+    assert target.recent_scan_limit == 25
+    assert target.start_date == datetime(2026, 7, 1, tzinfo=timezone.utc)
+    assert target.end_date == datetime(2026, 7, 9, 23, tzinfo=timezone.utc)
+    assert target.download_delay_seconds == 1.5
+
+
+def test_message_in_date_range_handles_naive_and_aware_dates() -> None:
+    message = type("Message", (), {"date": datetime(2026, 7, 5, 12, 0, 0)})()
+
+    assert message_in_date_range(
+        message,
+        start_date=datetime(2026, 7, 5, tzinfo=timezone.utc),
+        end_date=datetime(2026, 7, 6, tzinfo=timezone.utc),
+    ) is True
+    assert message_in_date_range(message, start_date=datetime(2026, 7, 6, tzinfo=timezone.utc)) is False
+
 
 def test_format_channel_check_result() -> None:
     text = format_channel_check_result(
@@ -722,6 +785,40 @@ async def test_archive_message_can_store_media_under_channel_root(tmp_path: Path
     files = list((settings.download_dir / "Example Channel" / "documents").glob("*.bin"))
     assert len(files) == 1
     assert files[0].read_bytes() == b"complete"
+
+
+@pytest.mark.anyio
+async def test_archive_message_skips_media_outside_allowed_media_types(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.db")
+    settings = saved_settings(tmp_path)
+    message = type("Message", (), {"id": 123, "chat_id": -100456, "text": "", "raw_text": ""})()
+    message.media = object()
+    message.file = type(
+        "File",
+        (),
+        {"name": "media.bin", "size": len(b"complete"), "mime_type": "application/octet-stream"},
+    )()
+    message.document = type(
+        "Document",
+        (),
+        {
+            "id": "file",
+            "file_reference": b"ref",
+            "size": len(b"complete"),
+            "mime_type": "application/octet-stream",
+            "attributes": [],
+        },
+    )()
+
+    await archive_message(
+        DownloadCompleteClient(),
+        database,
+        settings,
+        message,
+        allowed_media_types=frozenset({"video"}),
+    )
+
+    assert list((settings.download_dir / "documents").glob("*.bin")) == []
 
 
 @pytest.mark.anyio

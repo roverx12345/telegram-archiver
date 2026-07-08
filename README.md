@@ -75,6 +75,36 @@ CHANNEL_RECENT_SCAN_LIMIT=2000
 
 `CHANNEL_ARCHIVE_EXTENSIONS=archives` limits channel downloads to common archive files such as `.zip`, `.rar`, `.7z`, and `.tar.gz`. You can also provide an explicit comma-separated list, for example `.zip,.rar,.7z`. The password file is one password per line; blank lines and `#` comments are ignored. When `CHANNEL_STRIP_ARCHIVE_PASSWORDS=true`, newly downloaded encrypted archives are tested against that password file and repacked as unencrypted zip files when a password matches.
 
+For per-channel behavior, set `CHANNEL_ARCHIVE_CONFIG` to a JSON file instead of relying only on `CHANNEL_ARCHIVE_PEERS`:
+
+```env
+CHANNEL_ARCHIVE_CONFIG=./data/channel_archiver.json
+```
+
+```json
+{
+  "channels": [
+    {
+      "peer": "-1002683725559",
+      "extensions": "archives",
+      "archive_text": false
+    },
+    {
+      "peer": "-1003018373376",
+      "media_types": ["video", "animation", "video_note"],
+      "extensions": [".mp4", ".mov", ".mkv", ".webm", ".m4v"],
+      "archive_text": false,
+      "try_protected_content": true,
+      "existing_limit": 0,
+      "recent_limit": 2000,
+      "download_delay_seconds": 0.5
+    }
+  ]
+}
+```
+
+`existing_limit=0` means scan all existing messages. Optional `start_date` and `end_date` accept `YYYY-MM-DD` or ISO datetime strings. Channel files are stored under stable peer-id folders such as `peer-1003018373376/videos`.
+
 Docker deployments keep the channel archiver behind an explicit profile so it does not start downloading configured channel history by accident:
 
 ```bash
