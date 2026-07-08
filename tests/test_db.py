@@ -328,3 +328,50 @@ def test_channel_failures_are_scoped_by_source_key(tmp_path: Path) -> None:
     failures = db.unresolved_source_archive_failures(limit=10)
 
     assert {failure.source for failure in failures} == {"channel_100", "channel_200"}
+
+
+def test_archive_processing_lifecycle_is_scoped_by_source_key(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+
+    db.record_archive_processing(
+        source="channels",
+        source_key="channel_100",
+        source_chat_id=-100100,
+        source_message_id=7,
+        original_name="bundle.rar",
+        output_name="bundle_unlocked.zip",
+        status="unlocked",
+        password_matched=True,
+        file_sha256="sha",
+        final_path="/tmp/bundle_unlocked.zip",
+        part_group="bundle.rar",
+        part_count=2,
+        error_message=None,
+    )
+    db.record_archive_processing(
+        source="channels",
+        source_key="channel_200",
+        source_chat_id=-100200,
+        source_message_id=7,
+        original_name="bundle.rar",
+        output_name=None,
+        status="encrypted_kept",
+        password_matched=False,
+        file_sha256=None,
+        final_path=None,
+        part_group=None,
+        part_count=None,
+        error_message="no password matched",
+    )
+
+    first = db.get_archive_processing("channel_100", 7)
+    second = db.get_archive_processing("channel_200", 7)
+
+    assert first is not None
+    assert first.status == "unlocked"
+    assert first.password_matched is True
+    assert first.output_name == "bundle_unlocked.zip"
+    assert first.part_count == 2
+    assert second is not None
+    assert second.status == "encrypted_kept"
+    assert second.error_message == "no password matched"

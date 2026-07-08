@@ -228,6 +228,10 @@ def test_maybe_strip_archive_password_repacks_encrypted_zip(tmp_path: Path) -> N
     assert unlocked_path.name.endswith("_unlocked.zip")
     assert unlocked_ref.file_name == "encrypted_unlocked.zip"
     assert unlocked_ref.mime_type == "application/zip"
+    assert unlocked.status == "unlocked"
+    assert unlocked.password_matched is True
+    assert unlocked.original_name == "encrypted.zip"
+    assert unlocked.output_name == "encrypted_unlocked.zip"
     subprocess.run(
         [seven_zip, "t", "-y", str(unlocked_path)],
         stdin=subprocess.DEVNULL,
@@ -297,6 +301,10 @@ def test_maybe_strip_archive_password_merges_split_zip(tmp_path: Path) -> None:
 
     assert unlocked.path != first_temp
     assert unlocked.path.name.endswith("_unlocked.zip")
+    assert unlocked.status == "unlocked_multipart"
+    assert unlocked.password_matched is True
+    assert unlocked.part_group == "split.zip"
+    assert unlocked.part_count == len(volume_paths)
     assert second_temp is not None
     assert second_temp in unlocked.cleanup_paths
     subprocess.run(
@@ -694,6 +702,48 @@ async def test_archive_message_can_store_media_under_channel_root(tmp_path: Path
     files = list((settings.download_dir / "Example Channel" / "documents").glob("*.bin"))
     assert len(files) == 1
     assert files[0].read_bytes() == b"complete"
+
+
+@pytest.mark.anyio
+async def test_archive_message_records_archive_processing_metadata(tmp_path: Path) -> None:
+    database = Database(tmp_path / "bot.db")
+    settings = saved_settings(tmp_path)
+    message = type("Message", (), {"id": 124, "chat_id": -100456, "text": "", "raw_text": ""})()
+    message.media = object()
+    message.file = type(
+        "File",
+        (),
+        {"name": "media.zip", "size": len(b"complete"), "mime_type": "application/zip"},
+    )()
+    message.document = type(
+        "Document",
+        (),
+        {
+            "id": "zip-file",
+            "file_reference": b"ref",
+            "size": len(b"complete"),
+            "mime_type": "application/zip",
+            "attributes": [],
+        },
+    )()
+
+    await archive_message(
+        DownloadCompleteClient(),
+        database,
+        settings,
+        message,
+        source_key="channel_456",
+        media_root_dir=tmp_path / "downloads" / "Example Channel",
+    )
+
+    record = database.get_archive_processing("channel_456", 124)
+
+    assert record is not None
+    assert record.status == "not_requested"
+    assert record.password_matched is False
+    assert record.original_name == "media.zip"
+    assert record.final_path is not None
+    assert record.file_sha256 is not None
 
 
 

@@ -55,6 +55,24 @@ class SourceArchiveFailure:
     attempt_count: int
     resolved_at: str | None
 
+@dataclass(frozen=True)
+class ArchiveProcessingRecord:
+    id: int
+    source: str
+    source_key: str
+    source_chat_id: int | None
+    source_message_id: int
+    original_name: str | None
+    output_name: str | None
+    status: str
+    password_matched: bool
+    file_sha256: str | None
+    final_path: str | None
+    part_group: str | None
+    part_count: int | None
+    error_message: str | None
+    recorded_at: str
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -197,6 +215,26 @@ class Database:
                 attempt_count INTEGER NOT NULL DEFAULT 1,
                 resolved_at TEXT,
                 UNIQUE(source, source_message_id, media_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS archive_processing (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                source_chat_id INTEGER,
+                source_message_id INTEGER NOT NULL,
+                original_name TEXT,
+                output_name TEXT,
+                status TEXT NOT NULL,
+                password_matched INTEGER NOT NULL DEFAULT 0,
+                file_sha256 TEXT,
+                final_path TEXT,
+                part_group TEXT,
+                part_count INTEGER,
+                error_message TEXT,
+                recorded_at TEXT NOT NULL,
+                UNIQUE(source_key, source_message_id),
+                FOREIGN KEY(file_sha256) REFERENCES saved_files(sha256)
             );
             """
         )
@@ -824,6 +862,87 @@ class Database:
         )
         self.connection.commit()
 
+    def record_archive_processing(
+        self,
+        *,
+        source: str,
+        source_key: str,
+        source_chat_id: int | None,
+        source_message_id: int,
+        original_name: str | None,
+        output_name: str | None,
+        status: str,
+        password_matched: bool,
+        file_sha256: str | None,
+        final_path: str | None,
+        part_group: str | None,
+        part_count: int | None,
+        error_message: str | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO archive_processing(
+                source,
+                source_key,
+                source_chat_id,
+                source_message_id,
+                original_name,
+                output_name,
+                status,
+                password_matched,
+                file_sha256,
+                final_path,
+                part_group,
+                part_count,
+                error_message,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key, source_message_id) DO UPDATE SET
+                source = excluded.source,
+                source_chat_id = excluded.source_chat_id,
+                original_name = excluded.original_name,
+                output_name = excluded.output_name,
+                status = excluded.status,
+                password_matched = excluded.password_matched,
+                file_sha256 = excluded.file_sha256,
+                final_path = excluded.final_path,
+                part_group = excluded.part_group,
+                part_count = excluded.part_count,
+                error_message = excluded.error_message,
+                recorded_at = excluded.recorded_at
+            """,
+            (
+                source,
+                source_key,
+                source_chat_id,
+                source_message_id,
+                original_name,
+                output_name,
+                status,
+                1 if password_matched else 0,
+                file_sha256,
+                final_path,
+                part_group,
+                part_count,
+                error_message,
+                utc_now(),
+            ),
+        )
+        self.connection.commit()
+
+    def get_archive_processing(self, source_key: str, source_message_id: int) -> ArchiveProcessingRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM archive_processing
+            WHERE source_key = ?
+              AND source_message_id = ?
+            """,
+            (source_key, source_message_id),
+        ).fetchone()
+        return self._archive_processing_from_row(row) if row is not None else None
+
     def unresolved_source_archive_failures(self, *, limit: int = 20) -> list[SourceArchiveFailure]:
         rows = self.connection.execute(
             """
@@ -912,4 +1031,23 @@ class Database:
             last_seen_at=row["last_seen_at"],
             attempt_count=row["attempt_count"],
             resolved_at=row["resolved_at"],
+        )
+
+    def _archive_processing_from_row(self, row: sqlite3.Row) -> ArchiveProcessingRecord:
+        return ArchiveProcessingRecord(
+            id=row["id"],
+            source=row["source"],
+            source_key=row["source_key"],
+            source_chat_id=row["source_chat_id"],
+            source_message_id=row["source_message_id"],
+            original_name=row["original_name"],
+            output_name=row["output_name"],
+            status=row["status"],
+            password_matched=bool(row["password_matched"]),
+            file_sha256=row["file_sha256"],
+            final_path=row["final_path"],
+            part_group=row["part_group"],
+            part_count=row["part_count"],
+            error_message=row["error_message"],
+            recorded_at=row["recorded_at"],
         )

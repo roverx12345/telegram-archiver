@@ -105,6 +105,13 @@ class ProcessedArchive:
     path: Path
     ref: MediaRef
     cleanup_paths: tuple[Path, ...] = ()
+    status: str = "plain"
+    password_matched: bool = False
+    original_name: str | None = None
+    output_name: str | None = None
+    part_group: str | None = None
+    part_count: int | None = None
+    error_message: str | None = None
 
 @dataclass(frozen=True)
 class ChannelInfo:
@@ -1179,15 +1186,40 @@ async def archive_message(
         )
     if ref is None:
         return
+    record_processing = should_record_archive_processing(ref)
 
     existing = database.get_saved_by_unique_id(ref.file_unique_id)
     if existing is not None:
+        if record_processing:
+            record_archive_processing_metadata(
+                database,
+                message,
+                source_key=source_key,
+                original_name=ref.file_name,
+                output_name=existing.original_name,
+                status="duplicate_unique_id",
+                password_matched=False,
+                file_sha256=existing.sha256,
+                final_path=existing.final_path,
+            )
         database.resolve_source_archive_failure(source=source_key, source_message_id=message.id, media_type=ref.media_type)
         LOGGER.info("%s message %s already archived at %s", log_label, message.id, existing.final_path)
         return
 
     existing_by_file_id = database.get_saved_by_file_id(ref.file_id)
     if existing_by_file_id is not None:
+        if record_processing:
+            record_archive_processing_metadata(
+                database,
+                message,
+                source_key=source_key,
+                original_name=ref.file_name,
+                output_name=existing_by_file_id.original_name,
+                status="duplicate_file_id",
+                password_matched=False,
+                file_sha256=existing_by_file_id.sha256,
+                final_path=existing_by_file_id.final_path,
+            )
         database.record_alias(
             telegram_file_unique_id=ref.file_unique_id,
             telegram_file_id=ref.file_id,
@@ -1245,6 +1277,21 @@ async def archive_message(
                 file_sha256=existing_by_hash.sha256,
             )
             record_message_metadata(database, message, processed_ref, existing_by_hash.sha256, existing_by_hash.final_path, source_key=source_key)
+            if record_processing:
+                record_archive_processing_metadata(
+                    database,
+                    message,
+                    source_key=source_key,
+                    original_name=processed.original_name,
+                    output_name=existing_by_hash.original_name,
+                    status=f"duplicate_hash_{processed.status}",
+                    password_matched=processed.password_matched,
+                    file_sha256=existing_by_hash.sha256,
+                    final_path=existing_by_hash.final_path,
+                    part_group=processed.part_group,
+                    part_count=processed.part_count,
+                    error_message=processed.error_message,
+                )
             database.resolve_source_archive_failure(source=source_key, source_message_id=message.id, media_type=processed_ref.media_type)
             LOGGER.warning("Duplicate %s media skipped: message=%s path=%s", log_label, message.id, existing_by_hash.final_path)
             return
@@ -1273,6 +1320,21 @@ async def archive_message(
                 telegram_file_id=processed_ref.file_id,
             )
             record_message_metadata(database, message, processed_ref, sha256, str(final_path), source_key=source_key)
+            if record_processing:
+                record_archive_processing_metadata(
+                    database,
+                    message,
+                    source_key=source_key,
+                    original_name=processed.original_name,
+                    output_name=processed.output_name,
+                    status=processed.status,
+                    password_matched=processed.password_matched,
+                    file_sha256=sha256,
+                    final_path=str(final_path),
+                    part_group=processed.part_group,
+                    part_count=processed.part_count,
+                    error_message=processed.error_message,
+                )
             database.resolve_source_archive_failure(source=source_key, source_message_id=message.id, media_type=processed_ref.media_type)
         except Exception:
             final_path.replace(processed_temp_path)
@@ -1296,10 +1358,68 @@ async def archive_message(
             retryable=classification.retryable,
             temp_path=str(temp_path),
         )
+        if record_processing:
+            record_archive_processing_metadata(
+                database,
+                message,
+                source_key=source_key,
+                original_name=ref.file_name,
+                output_name=None,
+                status=archive_processing_failure_status(exc),
+                password_matched=False,
+                file_sha256=None,
+                final_path=None,
+                part_group=archive_processing_part_group(ref),
+                error_message=classification.message,
+            )
         LOGGER.exception("Failed to archive %s media: message=%s", log_label, message.id)
 
 def archive_source_name(source_key: str) -> str:
     return "channels" if source_key.startswith("channel_") else "saved"
+
+def should_record_archive_processing(ref: MediaRef) -> bool:
+    return media_ref_matches_extensions(ref, DEFAULT_ARCHIVE_EXTENSIONS)
+
+def record_archive_processing_metadata(
+    database: Database,
+    message: Message,
+    *,
+    source_key: str,
+    original_name: str | None,
+    output_name: str | None,
+    status: str,
+    password_matched: bool,
+    file_sha256: str | None,
+    final_path: str | None,
+    part_group: str | None = None,
+    part_count: int | None = None,
+    error_message: str | None = None,
+) -> None:
+    database.record_archive_processing(
+        source=archive_source_name(source_key),
+        source_key=source_key,
+        source_chat_id=getattr(message, "chat_id", None),
+        source_message_id=message.id,
+        original_name=original_name,
+        output_name=output_name,
+        status=status,
+        password_matched=password_matched,
+        file_sha256=file_sha256,
+        final_path=final_path,
+        part_group=part_group,
+        part_count=part_count,
+        error_message=error_message,
+    )
+
+def archive_processing_failure_status(exc: Exception) -> str:
+    message = str(exc).casefold()
+    if "multipart archive deferred" in message:
+        return "deferred_multipart"
+    return "failed"
+
+def archive_processing_part_group(ref: MediaRef) -> str | None:
+    part = multipart_archive_part(ref.file_name)
+    return part.group_key if part is not None else None
 
 def classify_archive_exception(exc: Exception) -> ArchiveErrorClassification:
     error_class = exc.__class__.__name__
@@ -1374,20 +1494,20 @@ def maybe_strip_archive_password(
     source_key: str = "saved",
 ) -> ProcessedArchive:
     if not enabled:
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="not_requested")
     if not media_ref_matches_extensions(ref, DEFAULT_ARCHIVE_EXTENSIONS):
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="not_archive")
     if password_file is None:
         LOGGER.warning("Archive password stripping is enabled but CHANNEL_ARCHIVE_PASSWORD_FILE is not set")
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="not_configured")
     if not password_file.exists():
         LOGGER.warning("Archive password file not found: path=%s", password_file)
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="not_configured")
 
     seven_zip = shutil.which("7z") or shutil.which("7zz")
     if seven_zip is None:
         LOGGER.warning("Archive password stripping requires 7z or 7zz in PATH")
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="tool_missing")
 
     multipart = collect_multipart_temp_parts(temp_dir, source_key, archive_path, ref) if temp_dir is not None else None
     if multipart is not None:
@@ -1401,12 +1521,12 @@ def maybe_strip_archive_password(
 
     if archive_test_succeeds(seven_zip, archive_path, password=None):
         LOGGER.info("Archive is not password-protected or can be read without a password: path=%s", archive_path)
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="plain")
 
     passwords = load_archive_passwords(password_file)
     if not passwords:
         LOGGER.warning("Archive password file is empty: path=%s", password_file)
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="password_file_empty")
 
     for password in passwords:
         if not archive_test_succeeds(seven_zip, archive_path, password=password):
@@ -1422,10 +1542,17 @@ def maybe_strip_archive_password(
             extension=".zip",
         )
         LOGGER.warning("Removed archive password: source=%s output=%s", archive_path, unlocked_path)
-        return ProcessedArchive(unlocked_path, unlocked_ref, cleanup_paths=(archive_path,))
+        return archive_processing_result(
+            unlocked_path,
+            unlocked_ref,
+            cleanup_paths=(archive_path,),
+            status="unlocked",
+            password_matched=True,
+            original_name=ref.file_name,
+        )
 
     LOGGER.warning("Encrypted archive kept because no password matched: path=%s", archive_path)
-    return ProcessedArchive(archive_path, ref)
+    return archive_processing_result(archive_path, ref, status="encrypted_kept", error_message="no password matched")
 
 
 def maybe_strip_multipart_archive_password(
@@ -1438,7 +1565,7 @@ def maybe_strip_multipart_archive_password(
 ) -> ProcessedArchive:
     current_part = multipart_archive_part(ref.file_name or archive_path.name)
     if current_part is None:
-        return ProcessedArchive(archive_path, ref)
+        return archive_processing_result(archive_path, ref, status="plain")
     first = multipart.get(1)
     if first is None or not current_part.is_first:
         raise RuntimeError(f"multipart archive deferred until first volume is downloaded: name={ref.file_name}")
@@ -1455,10 +1582,14 @@ def maybe_strip_multipart_archive_password(
         if archive_test_succeeds(seven_zip, first_path, password=None):
             unlocked_path = strip_archive_password(seven_zip, first_path, ref, None, output_path=output_path)
             unlocked_ref = unlocked_media_ref(ref, unlocked_path)
-            return ProcessedArchive(
+            return archive_processing_result(
                 unlocked_path,
                 unlocked_ref,
                 cleanup_paths=tuple(path for path, _, _ in multipart.values()),
+                status="plain_multipart_merged",
+                original_name=ref.file_name,
+                part_group=current_part.group_key,
+                part_count=len(multipart),
             )
         for password in passwords:
             if not archive_test_succeeds(seven_zip, first_path, password=password):
@@ -1466,10 +1597,15 @@ def maybe_strip_multipart_archive_password(
             unlocked_path = strip_archive_password(seven_zip, first_path, ref, password, output_path=output_path)
             unlocked_ref = unlocked_media_ref(ref, unlocked_path)
             LOGGER.warning("Removed multipart archive password: source=%s output=%s", archive_path, unlocked_path)
-            return ProcessedArchive(
+            return archive_processing_result(
                 unlocked_path,
                 unlocked_ref,
                 cleanup_paths=tuple(path for path, _, _ in multipart.values()),
+                status="unlocked_multipart",
+                password_matched=True,
+                original_name=ref.file_name,
+                part_group=current_part.group_key,
+                part_count=len(multipart),
             )
 
     raise RuntimeError(f"multipart archive deferred until all volumes and a matching password are available: name={ref.file_name}")
@@ -1484,6 +1620,34 @@ def unlocked_media_ref(ref: MediaRef, unlocked_path: Path) -> MediaRef:
         file_size=unlocked_path.stat().st_size,
         mime_type="application/zip",
         extension=".zip",
+    )
+
+
+def archive_processing_result(
+    path: Path,
+    ref: MediaRef,
+    *,
+    cleanup_paths: tuple[Path, ...] = (),
+    status: str,
+    password_matched: bool = False,
+    original_name: str | None = None,
+    output_name: str | None = None,
+    part_group: str | None = None,
+    part_count: int | None = None,
+    error_message: str | None = None,
+) -> ProcessedArchive:
+    part = multipart_archive_part(original_name or ref.file_name)
+    return ProcessedArchive(
+        path=path,
+        ref=ref,
+        cleanup_paths=cleanup_paths,
+        status=status,
+        password_matched=password_matched,
+        original_name=original_name or ref.file_name,
+        output_name=output_name or ref.file_name,
+        part_group=part_group or (part.group_key if part is not None else None),
+        part_count=part_count,
+        error_message=error_message,
     )
 
 
