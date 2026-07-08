@@ -25,6 +25,7 @@ from tele_bot.saved_archiver import (
     media_ref_from_message,
     media_ref_matches_extensions,
     maybe_strip_archive_password,
+    multipart_archive_part,
     normalized_channel_id,
     parse_channel_peer_id,
     parse_extension_set,
@@ -164,6 +165,28 @@ def test_media_ref_matches_multi_part_archive_extension() -> None:
     assert media_ref_matches_extensions(ref, frozenset({".tar.gz"})) is True
 
 
+def test_media_ref_matches_split_archive_extensions_from_archives_alias() -> None:
+    for name in ("bundle.part2.rar", "bundle.r00", "bundle.z01", "bundle.002"):
+        ref = MediaRef(
+            media_type="document",
+            file_id="file",
+            file_unique_id="unique",
+            file_name=name,
+            file_size=1,
+            mime_type="application/octet-stream",
+            extension=Path(name).suffix,
+        )
+        assert media_ref_matches_extensions(ref, frozenset({".zip", ".rar", ".7z", ".001"})) is True
+
+
+def test_multipart_archive_part_detects_common_volume_names() -> None:
+    assert multipart_archive_part("bundle.part1.rar").is_first is True
+    assert multipart_archive_part("bundle.part2.rar").order == 2
+    assert multipart_archive_part("bundle.r00").is_first is False
+    assert multipart_archive_part("bundle.zip").requires_sibling is True
+    assert multipart_archive_part("bundle.001").is_first is True
+
+
 def test_maybe_strip_archive_password_repacks_encrypted_zip(tmp_path: Path) -> None:
     seven_zip = shutil.which("7z") or shutil.which("7zz")
     if seven_zip is None:
@@ -192,12 +215,14 @@ def test_maybe_strip_archive_password_repacks_encrypted_zip(tmp_path: Path) -> N
         extension=".zip",
     )
 
-    unlocked_path, unlocked_ref = maybe_strip_archive_password(
+    unlocked = maybe_strip_archive_password(
         encrypted_path,
         ref,
         password_file=password_file,
         enabled=True,
     )
+    unlocked_path = unlocked.path
+    unlocked_ref = unlocked.ref
 
     assert unlocked_path != encrypted_path
     assert unlocked_path.name.endswith("_unlocked.zip")
@@ -205,6 +230,77 @@ def test_maybe_strip_archive_password_repacks_encrypted_zip(tmp_path: Path) -> N
     assert unlocked_ref.mime_type == "application/zip"
     subprocess.run(
         [seven_zip, "t", "-y", str(unlocked_path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+
+
+def test_maybe_strip_archive_password_merges_split_zip(tmp_path: Path) -> None:
+    seven_zip = shutil.which("7z") or shutil.which("7zz")
+    if seven_zip is None:
+        pytest.skip("7z is not installed")
+
+    source_file = tmp_path / "plain.bin"
+    source_file.write_bytes(os.urandom(20_000))
+    password_file = tmp_path / "passwords.txt"
+    password_file.write_text("wrong\nsecret\n", encoding="utf-8")
+    subprocess.run(
+        [seven_zip, "a", "-tzip", "-v1k", "-psecret", str(tmp_path / "split.zip"), str(source_file.name)],
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    volume_paths = sorted(tmp_path.glob("split.zip.*"))
+    if len(volume_paths) < 2:
+        pytest.skip("7z did not create a multi-volume archive")
+
+    first_ref = MediaRef(
+        media_type="document",
+        file_id="first",
+        file_unique_id="channel_1:1:first",
+        file_name="split.zip.001",
+        file_size=volume_paths[0].stat().st_size,
+        mime_type="application/octet-stream",
+        extension=".001",
+    )
+    first_temp = resumable_temp_path(tmp_path, 1, first_ref, source_key="channel_1")
+    volume_paths[0].replace(first_temp)
+    second_temp: Path | None = None
+    for index, volume_path in enumerate(volume_paths[1:], start=2):
+        extension = Path(volume_path.name).suffix
+        ref = MediaRef(
+            media_type="document",
+            file_id=f"volume-{index}",
+            file_unique_id=f"channel_1:{index}:volume",
+            file_name=volume_path.name,
+            file_size=volume_path.stat().st_size,
+            mime_type="application/octet-stream",
+            extension=extension,
+        )
+        temp_path = resumable_temp_path(tmp_path, index, ref, source_key="channel_1")
+        volume_path.replace(temp_path)
+        if index == 2:
+            second_temp = temp_path
+
+    unlocked = maybe_strip_archive_password(
+        first_temp,
+        first_ref,
+        password_file=password_file,
+        enabled=True,
+        temp_dir=tmp_path,
+        source_key="channel_1",
+    )
+
+    assert unlocked.path != first_temp
+    assert unlocked.path.name.endswith("_unlocked.zip")
+    assert second_temp is not None
+    assert second_temp in unlocked.cleanup_paths
+    subprocess.run(
+        [seven_zip, "t", "-y", str(unlocked.path)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

@@ -93,6 +93,20 @@ class ArchiveErrorClassification:
     message: str
 
 @dataclass(frozen=True)
+class MultipartArchivePart:
+    group_key: str
+    first_name: str
+    order: int
+    is_first: bool
+    requires_sibling: bool = False
+
+@dataclass(frozen=True)
+class ProcessedArchive:
+    path: Path
+    ref: MediaRef
+    cleanup_paths: tuple[Path, ...] = ()
+
+@dataclass(frozen=True)
 class ChannelInfo:
     id: int | None
     title: str
@@ -1201,12 +1215,17 @@ async def archive_message(
         if actual_temp_path is None:
             return
 
-        processed_temp_path, processed_ref = maybe_strip_archive_password(
+        processed = maybe_strip_archive_password(
             actual_temp_path,
             ref,
             password_file=password_file,
             enabled=strip_archive_passwords,
+            temp_dir=temp_dir,
+            source_key=source_key,
         )
+        processed_temp_path = processed.path
+        processed_ref = processed.ref
+        cleanup_paths = processed.cleanup_paths
 
         sha256 = sha256sum(processed_temp_path)
         existing_by_hash = database.get_saved_by_sha256(sha256)
@@ -1214,6 +1233,9 @@ async def archive_message(
             processed_temp_path.unlink(missing_ok=True)
             if processed_temp_path != actual_temp_path:
                 actual_temp_path.unlink(missing_ok=True)
+            for cleanup_path in cleanup_paths:
+                if cleanup_path not in {processed_temp_path, actual_temp_path}:
+                    cleanup_path.unlink(missing_ok=True)
             database.record_alias(
                 telegram_file_unique_id=processed_ref.file_unique_id,
                 telegram_file_id=processed_ref.file_id,
@@ -1255,6 +1277,9 @@ async def archive_message(
         except Exception:
             final_path.replace(processed_temp_path)
             raise
+        for cleanup_path in cleanup_paths:
+            if cleanup_path not in {processed_temp_path, actual_temp_path}:
+                cleanup_path.unlink(missing_ok=True)
         LOGGER.warning("Archived %s media: message=%s path=%s", log_label, message.id, final_path)
     except Exception as exc:
         # Keep the .part file so the next source run can resume it.
@@ -1334,6 +1359,8 @@ def media_ref_matches_extensions(ref: MediaRef, allowed_extensions: frozenset[st
     file_name = (ref.file_name or "").casefold()
     if file_name and any(file_name.endswith(extension) for extension in allowed_extensions):
         return True
+    if file_name and multipart_archive_part(ref.file_name) is not None and allowed_extensions & DEFAULT_ARCHIVE_EXTENSIONS:
+        return True
     return ref.extension.casefold() in allowed_extensions
 
 
@@ -1343,31 +1370,43 @@ def maybe_strip_archive_password(
     *,
     password_file: Path | None,
     enabled: bool,
-) -> tuple[Path, MediaRef]:
+    temp_dir: Path | None = None,
+    source_key: str = "saved",
+) -> ProcessedArchive:
     if not enabled:
-        return archive_path, ref
+        return ProcessedArchive(archive_path, ref)
     if not media_ref_matches_extensions(ref, DEFAULT_ARCHIVE_EXTENSIONS):
-        return archive_path, ref
+        return ProcessedArchive(archive_path, ref)
     if password_file is None:
         LOGGER.warning("Archive password stripping is enabled but CHANNEL_ARCHIVE_PASSWORD_FILE is not set")
-        return archive_path, ref
+        return ProcessedArchive(archive_path, ref)
     if not password_file.exists():
         LOGGER.warning("Archive password file not found: path=%s", password_file)
-        return archive_path, ref
+        return ProcessedArchive(archive_path, ref)
 
     seven_zip = shutil.which("7z") or shutil.which("7zz")
     if seven_zip is None:
         LOGGER.warning("Archive password stripping requires 7z or 7zz in PATH")
-        return archive_path, ref
+        return ProcessedArchive(archive_path, ref)
+
+    multipart = collect_multipart_temp_parts(temp_dir, source_key, archive_path, ref) if temp_dir is not None else None
+    if multipart is not None:
+        return maybe_strip_multipart_archive_password(
+            seven_zip,
+            archive_path,
+            ref,
+            password_file=password_file,
+            multipart=multipart,
+        )
 
     if archive_test_succeeds(seven_zip, archive_path, password=None):
         LOGGER.info("Archive is not password-protected or can be read without a password: path=%s", archive_path)
-        return archive_path, ref
+        return ProcessedArchive(archive_path, ref)
 
     passwords = load_archive_passwords(password_file)
     if not passwords:
         LOGGER.warning("Archive password file is empty: path=%s", password_file)
-        return archive_path, ref
+        return ProcessedArchive(archive_path, ref)
 
     for password in passwords:
         if not archive_test_succeeds(seven_zip, archive_path, password=password):
@@ -1383,10 +1422,69 @@ def maybe_strip_archive_password(
             extension=".zip",
         )
         LOGGER.warning("Removed archive password: source=%s output=%s", archive_path, unlocked_path)
-        return unlocked_path, unlocked_ref
+        return ProcessedArchive(unlocked_path, unlocked_ref, cleanup_paths=(archive_path,))
 
     LOGGER.warning("Encrypted archive kept because no password matched: path=%s", archive_path)
-    return archive_path, ref
+    return ProcessedArchive(archive_path, ref)
+
+
+def maybe_strip_multipart_archive_password(
+    seven_zip: str,
+    archive_path: Path,
+    ref: MediaRef,
+    *,
+    password_file: Path,
+    multipart: dict[int, tuple[Path, str, MultipartArchivePart]],
+) -> ProcessedArchive:
+    current_part = multipart_archive_part(ref.file_name or archive_path.name)
+    if current_part is None:
+        return ProcessedArchive(archive_path, ref)
+    first = multipart.get(1)
+    if first is None or not current_part.is_first:
+        raise RuntimeError(f"multipart archive deferred until first volume is downloaded: name={ref.file_name}")
+
+    passwords = load_archive_passwords(password_file)
+    if not passwords:
+        LOGGER.warning("Archive password file is empty: path=%s", password_file)
+        return ProcessedArchive(archive_path, ref)
+
+    with tempfile.TemporaryDirectory(prefix="telegram-archive-multipart-") as temp_dir_raw:
+        staged_dir = Path(temp_dir_raw)
+        first_path = stage_multipart_archive_parts(staged_dir, multipart)
+        output_path = archive_path.with_name(f"{archive_path.stem}_unlocked.zip")
+        if archive_test_succeeds(seven_zip, first_path, password=None):
+            unlocked_path = strip_archive_password(seven_zip, first_path, ref, None, output_path=output_path)
+            unlocked_ref = unlocked_media_ref(ref, unlocked_path)
+            return ProcessedArchive(
+                unlocked_path,
+                unlocked_ref,
+                cleanup_paths=tuple(path for path, _, _ in multipart.values()),
+            )
+        for password in passwords:
+            if not archive_test_succeeds(seven_zip, first_path, password=password):
+                continue
+            unlocked_path = strip_archive_password(seven_zip, first_path, ref, password, output_path=output_path)
+            unlocked_ref = unlocked_media_ref(ref, unlocked_path)
+            LOGGER.warning("Removed multipart archive password: source=%s output=%s", archive_path, unlocked_path)
+            return ProcessedArchive(
+                unlocked_path,
+                unlocked_ref,
+                cleanup_paths=tuple(path for path, _, _ in multipart.values()),
+            )
+
+    raise RuntimeError(f"multipart archive deferred until all volumes and a matching password are available: name={ref.file_name}")
+
+
+def unlocked_media_ref(ref: MediaRef, unlocked_path: Path) -> MediaRef:
+    return MediaRef(
+        media_type=ref.media_type,
+        file_id=ref.file_id,
+        file_unique_id=ref.file_unique_id,
+        file_name=unlocked_archive_name(ref),
+        file_size=unlocked_path.stat().st_size,
+        mime_type="application/zip",
+        extension=".zip",
+    )
 
 
 def load_archive_passwords(password_file: Path) -> list[str]:
@@ -1397,6 +1495,133 @@ def load_archive_passwords(password_file: Path) -> list[str]:
             continue
         passwords.append(item)
     return passwords
+
+
+def collect_multipart_temp_parts(
+    temp_dir: Path | None,
+    source_key: str,
+    current_path: Path,
+    ref: MediaRef,
+) -> dict[int, tuple[Path, str, MultipartArchivePart]] | None:
+    current_name = sanitize_filename(ref.file_name or ref.media_type)
+    current_part = multipart_archive_part(current_name)
+    if current_part is None or temp_dir is None:
+        return None
+
+    parts: dict[int, tuple[Path, str, MultipartArchivePart]] = {
+        current_part.order: (current_path, current_name, current_part)
+    }
+    prefix = f"{sanitize_filename(source_key)}_"
+    for path in temp_dir.glob(f"{prefix}*.part"):
+        display_name = temp_display_name(path, source_key)
+        if display_name is None:
+            continue
+        part = multipart_archive_part(display_name)
+        if part is None or part.group_key != current_part.group_key:
+            continue
+        parts[part.order] = (path, display_name, part)
+
+    if current_part.requires_sibling and len(parts) == 1:
+        return None
+    return parts
+
+
+def temp_display_name(path: Path, source_key: str) -> str | None:
+    prefix = f"{sanitize_filename(source_key)}_"
+    if not path.name.startswith(prefix) or not path.name.endswith(".part"):
+        return None
+    rest = path.name[len(prefix):-5]
+    match = re.fullmatch(r"\d+_[0-9a-f]{16}_(.+)", rest)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def multipart_archive_part(file_name: str | None) -> MultipartArchivePart | None:
+    if not file_name:
+        return None
+    name = sanitize_filename(file_name)
+    lower = name.casefold()
+
+    match = re.fullmatch(r"(.+)\.part(\d+)\.rar", lower)
+    if match:
+        order = int(match.group(2))
+        base = match.group(1)
+        return MultipartArchivePart(
+            group_key=f"{base}.part.rar",
+            first_name=f"{base}.part1.rar",
+            order=order,
+            is_first=order == 1,
+        )
+
+    match = re.fullmatch(r"(.+)\.r(\d{2,3})", lower)
+    if match:
+        order = int(match.group(2)) + 2
+        base = match.group(1)
+        return MultipartArchivePart(
+            group_key=f"{base}.rar",
+            first_name=f"{base}.rar",
+            order=order,
+            is_first=False,
+        )
+
+    if lower.endswith(".rar"):
+        return MultipartArchivePart(
+            group_key=lower,
+            first_name=lower,
+            order=1,
+            is_first=True,
+            requires_sibling=True,
+        )
+
+    match = re.fullmatch(r"(.+)\.z(\d{2,3})", lower)
+    if match:
+        order = int(match.group(2))
+        base = match.group(1)
+        return MultipartArchivePart(
+            group_key=f"{base}.zip",
+            first_name=f"{base}.zip",
+            order=order,
+            is_first=False,
+        )
+
+    if lower.endswith(".zip"):
+        return MultipartArchivePart(
+            group_key=lower,
+            first_name=lower,
+            order=1,
+            is_first=True,
+            requires_sibling=True,
+        )
+
+    match = re.fullmatch(r"(.+)\.(\d{3})", lower)
+    if match:
+        order = int(match.group(2))
+        base = match.group(1)
+        return MultipartArchivePart(
+            group_key=base,
+            first_name=f"{base}.001",
+            order=order,
+            is_first=order == 1,
+        )
+
+    return None
+
+
+def stage_multipart_archive_parts(
+    staged_dir: Path,
+    multipart: dict[int, tuple[Path, str, MultipartArchivePart]],
+) -> Path:
+    first_path: Path | None = None
+    for order, (path, display_name, part) in sorted(multipart.items()):
+        staged_path = staged_dir / sanitize_filename(display_name)
+        staged_path.symlink_to(path)
+        if order == 1:
+            first_path = staged_path
+    if first_path is None:
+        first_name = next(iter(multipart.values()))[2].first_name
+        first_path = staged_dir / first_name
+    return first_path
 
 
 def archive_test_succeeds(seven_zip: str, archive_path: Path, *, password: str | None) -> bool:
@@ -1414,13 +1639,24 @@ def archive_test_succeeds(seven_zip: str, archive_path: Path, *, password: str |
     return result.returncode == 0
 
 
-def strip_archive_password(seven_zip: str, archive_path: Path, ref: MediaRef, password: str) -> Path:
+def strip_archive_password(
+    seven_zip: str,
+    archive_path: Path,
+    ref: MediaRef,
+    password: str | None,
+    *,
+    output_path: Path | None = None,
+) -> Path:
     with tempfile.TemporaryDirectory(prefix="telegram-archive-unlock-") as temp_dir_raw:
         temp_dir = Path(temp_dir_raw)
         extract_dir = temp_dir / "contents"
         extract_dir.mkdir()
+        extract_args = [seven_zip, "x", "-y", f"-o{extract_dir}"]
+        if password is not None:
+            extract_args.append(f"-p{password}")
+        extract_args.append(str(archive_path))
         extract_result = subprocess.run(
-            [seven_zip, "x", "-y", f"-p{password}", f"-o{extract_dir}", str(archive_path)],
+            extract_args,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -1430,7 +1666,7 @@ def strip_archive_password(seven_zip: str, archive_path: Path, ref: MediaRef, pa
         if extract_result.returncode != 0:
             raise RuntimeError(f"failed to extract encrypted archive: {extract_result.stderr.strip()}")
 
-        unlocked_path = archive_path.with_name(f"{archive_path.stem}_unlocked.zip")
+        unlocked_path = output_path or archive_path.with_name(f"{archive_path.stem}_unlocked.zip")
         unlocked_path.unlink(missing_ok=True)
         pack_result = subprocess.run(
             [seven_zip, "a", "-tzip", str(unlocked_path), "."],
