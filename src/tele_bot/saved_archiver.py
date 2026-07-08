@@ -1131,7 +1131,7 @@ async def archive_message(
 
     existing = database.get_saved_by_unique_id(ref.file_unique_id)
     if existing is not None:
-        database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=ref.media_type)
+        database.resolve_source_archive_failure(source=source_key, source_message_id=message.id, media_type=ref.media_type)
         LOGGER.info("%s message %s already archived at %s", log_label, message.id, existing.final_path)
         return
 
@@ -1145,8 +1145,8 @@ async def archive_message(
             source_message_id=message.id,
             file_sha256=existing_by_file_id.sha256,
         )
-        record_message_metadata(database, message, ref, existing_by_file_id.sha256, existing_by_file_id.final_path)
-        database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=ref.media_type)
+        record_message_metadata(database, message, ref, existing_by_file_id.sha256, existing_by_file_id.final_path, source_key=source_key)
+        database.resolve_source_archive_failure(source=source_key, source_message_id=message.id, media_type=ref.media_type)
         LOGGER.warning(
             "Duplicate %s media skipped before download: message=%s path=%s",
             log_label,
@@ -1185,8 +1185,8 @@ async def archive_message(
                 source_message_id=message.id,
                 file_sha256=existing_by_hash.sha256,
             )
-            record_message_metadata(database, message, processed_ref, existing_by_hash.sha256, existing_by_hash.final_path)
-            database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=processed_ref.media_type)
+            record_message_metadata(database, message, processed_ref, existing_by_hash.sha256, existing_by_hash.final_path, source_key=source_key)
+            database.resolve_source_archive_failure(source=source_key, source_message_id=message.id, media_type=processed_ref.media_type)
             LOGGER.warning("Duplicate %s media skipped: message=%s path=%s", log_label, message.id, existing_by_hash.final_path)
             return
 
@@ -1212,8 +1212,8 @@ async def archive_message(
                 telegram_file_unique_id=processed_ref.file_unique_id,
                 telegram_file_id=processed_ref.file_id,
             )
-            record_message_metadata(database, message, processed_ref, sha256, str(final_path))
-            database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=processed_ref.media_type)
+            record_message_metadata(database, message, processed_ref, sha256, str(final_path), source_key=source_key)
+            database.resolve_source_archive_failure(source=source_key, source_message_id=message.id, media_type=processed_ref.media_type)
         except Exception:
             final_path.replace(processed_temp_path)
             raise
@@ -1222,7 +1222,7 @@ async def archive_message(
         # Keep the .part file so the next source run can resume it.
         classification = classify_archive_exception(exc)
         database.record_source_archive_failure(
-            source=source,
+            source=source_key,
             source_message_id=message.id,
             media_type=ref.media_type,
             original_name=ref.file_name,
@@ -1717,14 +1717,15 @@ def record_message_metadata(
     ref: MediaRef,
     file_sha256: str | None,
     final_path: str | None,
+    *,
+    source_key: str = "saved",
 ) -> None:
     forward = getattr(message, "forward", None)
     media = getattr(message, "media", None)
-    database.record_saved_message_metadata(
+    metadata = dict(
         source_message_id=message.id,
         file_sha256=file_sha256,
         final_path=final_path,
-        chat_id=getattr(message, "chat_id", None),
         message_date=isoformat_or_none(getattr(message, "date", None)),
         edit_date=isoformat_or_none(getattr(message, "edit_date", None)),
         text=getattr(message, "raw_text", None) or None,
@@ -1744,6 +1745,18 @@ def record_message_metadata(
         duration=getattr(media, "duration", None),
         telegram_file_id=ref.file_id,
     )
+    source = archive_source_name(source_key)
+    database.record_source_message_metadata(
+        source=source,
+        source_key=source_key,
+        source_chat_id=getattr(message, "chat_id", None),
+        **metadata,
+    )
+    if source_key == "saved":
+        database.record_saved_message_metadata(
+            chat_id=getattr(message, "chat_id", None),
+            **metadata,
+        )
 
 def isoformat_or_none(value) -> str | None:
     if value is None:

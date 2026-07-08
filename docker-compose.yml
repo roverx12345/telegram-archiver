@@ -21,6 +21,19 @@ services:
       - /srv/nas/nasdata/saved-archiver:/app/downloads
       - ./data:/app/data
     restart: unless-stopped
+  channels-archiver:
+    user: "1000:1000"
+    build: .
+    profiles:
+      - channels
+    env_file:
+      - .env
+    init: true
+    command: ["telegram-archiver", "channels"]
+    volumes:
+      - /srv/nas/nasdata/saved-archiver:/app/downloads
+      - ./data:/app/data
+    restart: unless-stopped
   dashboard:
     user: "1000:1000"
     build: .

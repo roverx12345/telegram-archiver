@@ -54,7 +54,7 @@ def test_dashboard_counts_non_bot_archives_only(tmp_path: Path) -> None:
         telegram_file_id="bot-file-id",
     )
     db.record_source_archive_failure(
-        source="saved",
+        source="channel_2683725559",
         source_message_id=40,
         media_type="video",
         original_name="broken.mp4",
@@ -92,6 +92,8 @@ def test_dashboard_counts_non_bot_archives_only(tmp_path: Path) -> None:
     assert status["database"]["failures"]["unresolved_count"] == 1
     assert status["database"]["failures"]["retryable_count"] == 1
     assert status["database"]["failures"]["recent"][0]["error_kind"] == "expired_file_reference"
+    assert status["database"]["failures"]["recent"][0]["source"] == "channels"
+    assert status["database"]["failures"]["recent"][0]["source_key"] == "channel_2683725559"
     assert status["health"]["level"] == "warning"
 
 

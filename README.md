@@ -75,6 +75,12 @@ CHANNEL_RECENT_SCAN_LIMIT=2000
 
 `CHANNEL_ARCHIVE_EXTENSIONS=archives` limits channel downloads to common archive files such as `.zip`, `.rar`, `.7z`, and `.tar.gz`. You can also provide an explicit comma-separated list, for example `.zip,.rar,.7z`. The password file is one password per line; blank lines and `#` comments are ignored. When `CHANNEL_STRIP_ARCHIVE_PASSWORDS=true`, newly downloaded encrypted archives are tested against that password file and repacked as unencrypted zip files when a password matches.
 
+Docker deployments keep the channel archiver behind an explicit profile so it does not start downloading configured channel history by accident:
+
+```bash
+docker compose --profile channels up -d channels-archiver
+```
+
 ## Run Modes
 
 ```bash
@@ -100,7 +106,7 @@ The bot source still retries failed downloads from the beginning.
 
 On startup, the Saved Messages source can revisit message IDs parsed from existing `.tmp/saved_<message_id>_*.part` files and resume those partial downloads. The channel source does the same for `.tmp/channel_<channel_id>_<message_id>_*.part` files. Both Telethon sources can periodically rescan recent messages so missed realtime updates are picked up later.
 
-The read-only dashboard shows non-bot source progress from the shared SQLite database and `DOWNLOAD_DIR/.tmp`:
+The read-only dashboard shows Saved Messages and channel progress from the shared SQLite database and `DOWNLOAD_DIR/.tmp`:
 
 ```bash
 telegram-archiver dashboard

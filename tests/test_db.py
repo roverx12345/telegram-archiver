@@ -237,3 +237,94 @@ def test_source_archive_failure_lifecycle(tmp_path: Path) -> None:
     db.resolve_source_archive_failure(source="saved", source_message_id=123, media_type="video")
 
     assert db.unresolved_source_archive_failures() == []
+
+
+def test_source_message_metadata_is_scoped_by_source_key(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+
+    db.record_source_message_metadata(
+        source="channels",
+        source_key="channel_100",
+        source_chat_id=-100100,
+        source_message_id=7,
+        file_sha256=None,
+        final_path="/tmp/a.zip",
+        message_date=None,
+        edit_date=None,
+        text=None,
+        forwarded_sender_id=None,
+        forwarded_chat_id=None,
+        forwarded_channel_post=None,
+        forwarded_date=None,
+        forwarded_post_author=None,
+        grouped_id=None,
+        reply_to_msg_id=None,
+        media_type="document",
+        mime_type="application/zip",
+        original_name="a.zip",
+        file_size=10,
+        width=None,
+        height=None,
+        duration=None,
+        telegram_file_id="file-a",
+    )
+    db.record_source_message_metadata(
+        source="channels",
+        source_key="channel_200",
+        source_chat_id=-100200,
+        source_message_id=7,
+        file_sha256=None,
+        final_path="/tmp/b.zip",
+        message_date=None,
+        edit_date=None,
+        text=None,
+        forwarded_sender_id=None,
+        forwarded_chat_id=None,
+        forwarded_channel_post=None,
+        forwarded_date=None,
+        forwarded_post_author=None,
+        grouped_id=None,
+        reply_to_msg_id=None,
+        media_type="document",
+        mime_type="application/zip",
+        original_name="b.zip",
+        file_size=20,
+        width=None,
+        height=None,
+        duration=None,
+        telegram_file_id="file-b",
+    )
+
+    rows = db.connection.execute(
+        """
+        SELECT source_key, source_message_id, final_path
+        FROM source_message_metadata
+        ORDER BY source_key
+        """
+    ).fetchall()
+
+    assert [(row["source_key"], row["source_message_id"], row["final_path"]) for row in rows] == [
+        ("channel_100", 7, "/tmp/a.zip"),
+        ("channel_200", 7, "/tmp/b.zip"),
+    ]
+
+
+def test_channel_failures_are_scoped_by_source_key(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+    for source in ("channel_100", "channel_200"):
+        db.record_source_archive_failure(
+            source=source,
+            source_message_id=7,
+            media_type="document",
+            original_name=f"{source}.zip",
+            file_size=1,
+            error_kind="network",
+            error_class="TimeoutError",
+            error_message="timeout",
+            retryable=True,
+            temp_path=f"/tmp/{source}.part",
+        )
+
+    failures = db.unresolved_source_archive_failures(limit=10)
+
+    assert {failure.source for failure in failures} == {"channel_100", "channel_200"}

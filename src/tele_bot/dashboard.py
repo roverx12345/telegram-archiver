@@ -393,7 +393,11 @@ def collect_failure_summary(connection: sqlite3.Connection) -> dict[str, Any]:
     recent = rows_to_dicts(
         connection.execute(
             """
-            SELECT source,
+            SELECT CASE
+                       WHEN source LIKE 'channel\\_%' ESCAPE '\\' THEN 'channels'
+                       ELSE source
+                   END AS source,
+                   source AS source_key,
                    source_message_id,
                    media_type,
                    original_name,

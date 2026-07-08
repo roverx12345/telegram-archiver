@@ -140,7 +140,13 @@ CHANNEL_RECENT_SCAN_LIMIT=2000
 
 `CHANNEL_ARCHIVE_EXTENSIONS=archives` 表示只下载常见压缩包，例如 `.zip/.rar/.7z/.tar.gz`。也可以写成逗号分隔的扩展名列表，例如 `.zip,.rar,.7z`。密码库文件一行一个密码，空行和 `#` 开头的注释会被忽略；启用 `CHANNEL_STRIP_ARCHIVE_PASSWORDS=true` 后，新下载的加密压缩包会用密码库尝试解密，成功后保存为无密码 zip。
 
-非 bot 归档监控面板：
+Docker 部署里频道归档放在显式 profile 后面，避免一启动就意外下载已配置频道的历史内容：
+
+```bash
+docker compose --profile channels up -d channels-archiver
+```
+
+Saved Messages / channels 归档监控面板：
 
 ```bash
 telegram-archiver dashboard

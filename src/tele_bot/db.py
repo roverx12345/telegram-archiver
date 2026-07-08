@@ -127,6 +127,37 @@ class Database:
                 FOREIGN KEY(file_sha256) REFERENCES saved_files(sha256)
             );
 
+            CREATE TABLE IF NOT EXISTS source_message_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                source_chat_id INTEGER,
+                source_message_id INTEGER NOT NULL,
+                file_sha256 TEXT,
+                final_path TEXT,
+                message_date TEXT,
+                edit_date TEXT,
+                text TEXT,
+                forwarded_sender_id INTEGER,
+                forwarded_chat_id INTEGER,
+                forwarded_channel_post INTEGER,
+                forwarded_date TEXT,
+                forwarded_post_author TEXT,
+                grouped_id INTEGER,
+                reply_to_msg_id INTEGER,
+                media_type TEXT,
+                mime_type TEXT,
+                original_name TEXT,
+                file_size INTEGER,
+                width INTEGER,
+                height INTEGER,
+                duration REAL,
+                telegram_file_id TEXT,
+                recorded_at TEXT NOT NULL,
+                UNIQUE(source_key, source_message_id),
+                FOREIGN KEY(file_sha256) REFERENCES saved_files(sha256)
+            );
+
             CREATE TABLE IF NOT EXISTS download_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_chat_id INTEGER NOT NULL,
@@ -423,6 +454,79 @@ class Database:
             """,
             (
                 source_message_id, file_sha256, final_path, chat_id, message_date, edit_date, text,
+                forwarded_sender_id, forwarded_chat_id, forwarded_channel_post, forwarded_date,
+                forwarded_post_author, grouped_id, reply_to_msg_id, media_type, mime_type,
+                original_name, file_size, width, height, duration, telegram_file_id, utc_now(),
+            ),
+        )
+        self.connection.commit()
+
+    def record_source_message_metadata(
+        self,
+        *,
+        source: str,
+        source_key: str,
+        source_chat_id: int | None,
+        source_message_id: int,
+        file_sha256: str | None,
+        final_path: str | None,
+        message_date: str | None,
+        edit_date: str | None,
+        text: str | None,
+        forwarded_sender_id: int | None,
+        forwarded_chat_id: int | None,
+        forwarded_channel_post: int | None,
+        forwarded_date: str | None,
+        forwarded_post_author: str | None,
+        grouped_id: int | None,
+        reply_to_msg_id: int | None,
+        media_type: str | None,
+        mime_type: str | None,
+        original_name: str | None,
+        file_size: int | None,
+        width: int | None,
+        height: int | None,
+        duration: float | None,
+        telegram_file_id: str | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO source_message_metadata(
+                source, source_key, source_chat_id, source_message_id,
+                file_sha256, final_path, message_date, edit_date, text,
+                forwarded_sender_id, forwarded_chat_id, forwarded_channel_post, forwarded_date,
+                forwarded_post_author, grouped_id, reply_to_msg_id, media_type, mime_type,
+                original_name, file_size, width, height, duration, telegram_file_id, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key, source_message_id) DO UPDATE SET
+                source = excluded.source,
+                source_chat_id = excluded.source_chat_id,
+                file_sha256 = COALESCE(excluded.file_sha256, source_message_metadata.file_sha256),
+                final_path = COALESCE(excluded.final_path, source_message_metadata.final_path),
+                message_date = excluded.message_date,
+                edit_date = excluded.edit_date,
+                text = excluded.text,
+                forwarded_sender_id = excluded.forwarded_sender_id,
+                forwarded_chat_id = excluded.forwarded_chat_id,
+                forwarded_channel_post = excluded.forwarded_channel_post,
+                forwarded_date = excluded.forwarded_date,
+                forwarded_post_author = excluded.forwarded_post_author,
+                grouped_id = excluded.grouped_id,
+                reply_to_msg_id = excluded.reply_to_msg_id,
+                media_type = excluded.media_type,
+                mime_type = excluded.mime_type,
+                original_name = excluded.original_name,
+                file_size = excluded.file_size,
+                width = excluded.width,
+                height = excluded.height,
+                duration = excluded.duration,
+                telegram_file_id = excluded.telegram_file_id,
+                recorded_at = excluded.recorded_at
+            """,
+            (
+                source, source_key, source_chat_id, source_message_id,
+                file_sha256, final_path, message_date, edit_date, text,
                 forwarded_sender_id, forwarded_chat_id, forwarded_channel_post, forwarded_date,
                 forwarded_post_author, grouped_id, reply_to_msg_id, media_type, mime_type,
                 original_name, file_size, width, height, duration, telegram_file_id, utc_now(),
