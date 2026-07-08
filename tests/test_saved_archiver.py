@@ -15,6 +15,7 @@ from tele_bot.saved_archiver import (
     archive_message,
     classify_archive_exception,
     channel_partial_message_refs,
+    channel_storage_folder_name,
     channel_storage_roots,
     download_media_resumable,
     format_channel_check_result,
@@ -116,16 +117,20 @@ def test_format_channel_list() -> None:
     assert "title=Example Channel" in text
 
 
-def test_channel_storage_roots_use_sanitized_channel_titles(tmp_path: Path) -> None:
+def test_channel_storage_roots_use_stable_peer_id_folders(tmp_path: Path) -> None:
     first = type("Channel", (), {"id": 123, "title": "Example/Channel"})()
-    duplicate = type("Channel", (), {"id": 456, "title": "Example:Channel"})()
-    unique = type("Channel", (), {"id": 789, "title": "Other"})()
+    duplicate_title = type("Channel", (), {"id": 456, "title": "Example/Channel"})()
+    no_title = type("Channel", (), {"id": -100789, "title": None})()
 
-    roots = channel_storage_roots(tmp_path, [first, duplicate, unique])
+    roots = channel_storage_roots(tmp_path, [first, duplicate_title, no_title])
 
-    assert roots[123] == tmp_path / "Example_Channel_123"
-    assert roots[456] == tmp_path / "Example_Channel_456"
-    assert roots[789] == tmp_path / "Other"
+    assert roots[123] == tmp_path / "peer-100123"
+    assert roots[456] == tmp_path / "peer-100456"
+    assert roots[100789] == tmp_path / "peer-100100789"
+
+
+def test_channel_storage_folder_name_uses_full_peer_id() -> None:
+    assert channel_storage_folder_name(3018373376) == "peer-1003018373376"
 
 
 def test_parse_channel_peer_id_accepts_listed_and_full_ids() -> None:

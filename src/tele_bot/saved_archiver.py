@@ -974,26 +974,17 @@ def channel_info_from_entity(entity: object) -> ChannelInfo:
 
 
 def channel_storage_roots(root_dir: Path, entities: list[object]) -> dict[int, Path]:
-    channel_ids: list[int] = []
-    base_names: dict[int, str] = {}
-    name_counts: dict[str, int] = {}
+    roots: dict[int, Path] = {}
     for entity in entities:
         channel_id = normalized_channel_id(getattr(entity, "id", None))
         if channel_id == 0:
             continue
-        base_name = sanitize_filename(display_peer_title(entity))
-        channel_ids.append(channel_id)
-        base_names[channel_id] = base_name
-        name_counts[base_name.lower()] = name_counts.get(base_name.lower(), 0) + 1
-
-    roots: dict[int, Path] = {}
-    for channel_id in channel_ids:
-        base_name = base_names[channel_id]
-        folder_name = base_name
-        if name_counts[base_name.lower()] > 1:
-            folder_name = f"{base_name}_{channel_id}"
-        roots[channel_id] = root_dir / folder_name
+        roots[channel_id] = root_dir / channel_storage_folder_name(channel_id)
     return roots
+
+
+def channel_storage_folder_name(channel_id: int) -> str:
+    return f"peer-100{channel_id}"
 
 
 async def resolve_channel_entity(client: TelegramClient, peer: str) -> object:
