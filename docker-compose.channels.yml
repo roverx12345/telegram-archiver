@@ -7,6 +7,6 @@ services:
     init: true
     command: ["telegram-archiver", "channels"]
     volumes:
-      - /srv/nas/nasdata/saved-archiver:/app/downloads
+      - /srv/nas/nasdata/channel-archives:/app/downloads
       - ./data:/app/data
     restart: unless-stopped

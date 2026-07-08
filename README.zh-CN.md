@@ -126,11 +126,17 @@ telegram-archiver all
 CHANNEL_ARCHIVE_PEERS=-1002683725559,@public_channel
 CHANNEL_TELEGRAM_SESSION=./data/channel_archiver.session
 CHANNEL_ARCHIVE_EXISTING=true
+CHANNEL_ARCHIVE_EXTENSIONS=archives
+CHANNEL_ARCHIVE_TEXT=false
+CHANNEL_ARCHIVE_PASSWORD_FILE=./data/channel_passwords.txt
+CHANNEL_STRIP_ARCHIVE_PASSWORDS=true
 CHANNEL_RECENT_SCAN_INTERVAL_SECONDS=900
 CHANNEL_RECENT_SCAN_LIMIT=2000
 ```
 
 `CHANNEL_TELEGRAM_SESSION` 默认使用独立 session，适合和 `saved-archiver` 同时运行。第一次运行 `telegram-archiver channels` 可能需要登录这个 session。频道如果返回 protected 内容标记，归档器会跳过。
+
+`CHANNEL_ARCHIVE_EXTENSIONS=archives` 表示只下载常见压缩包，例如 `.zip/.rar/.7z/.tar.gz`。也可以写成逗号分隔的扩展名列表，例如 `.zip,.rar,.7z`。密码库文件一行一个密码，空行和 `#` 开头的注释会被忽略；启用 `CHANNEL_STRIP_ARCHIVE_PASSWORDS=true` 后，新下载的加密压缩包会用密码库尝试解密，成功后保存为无密码 zip。
 
 只统计 Saved Messages 待处理数量、不下载：
 

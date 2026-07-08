@@ -6,7 +6,9 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -30,6 +32,23 @@ from .media import (
 LOGGER = logging.getLogger(__name__)
 SAVED_PARTIAL_NAME_RE = re.compile(r"^saved_(\d+)_.*\.part$")
 CHANNEL_PARTIAL_NAME_RE = re.compile(r"^channel_(-?\d+)_(\d+)_.*\.part$")
+DEFAULT_ARCHIVE_EXTENSIONS = frozenset({
+    ".7z",
+    ".001",
+    ".bz2",
+    ".gz",
+    ".rar",
+    ".tar",
+    ".tar.bz2",
+    ".tar.gz",
+    ".tar.xz",
+    ".tbz",
+    ".tgz",
+    ".txz",
+    ".xz",
+    ".zip",
+    ".zst",
+})
 
 @dataclass(frozen=True)
 class SavedArchiverSettings:
@@ -93,6 +112,10 @@ class ChannelCheckResult:
 class ChannelArchiverSettings:
     archive: SavedArchiverSettings
     peers: tuple[str, ...]
+    allowed_extensions: frozenset[str]
+    archive_text: bool
+    password_file: Path | None
+    strip_archive_passwords: bool
 
 def load_saved_archiver_settings() -> SavedArchiverSettings:
     load_dotenv()
@@ -193,7 +216,16 @@ def load_channel_archiver_settings() -> ChannelArchiverSettings:
         blocked_forward_keywords=frozenset(),
         proxy=parse_telethon_proxy(os.getenv("TELETHON_PROXY")),
     )
-    return ChannelArchiverSettings(archive=archive, peers=peers)
+    password_file_raw = os.getenv("CHANNEL_ARCHIVE_PASSWORD_FILE", "").strip()
+    password_file = Path(password_file_raw).expanduser().resolve() if password_file_raw else None
+    return ChannelArchiverSettings(
+        archive=archive,
+        peers=peers,
+        allowed_extensions=parse_extension_set(os.getenv("CHANNEL_ARCHIVE_EXTENSIONS")),
+        archive_text=_to_bool(os.getenv("CHANNEL_ARCHIVE_TEXT"), default=True),
+        password_file=password_file,
+        strip_archive_passwords=_to_bool(os.getenv("CHANNEL_STRIP_ARCHIVE_PASSWORDS"), default=False),
+    )
 
 
 def _to_bool(value: str | None, default: bool = False) -> bool:
@@ -220,6 +252,22 @@ def parse_peer_list(value: str | None) -> tuple[str, ...]:
     if not value or not value.strip():
         return ()
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+def parse_extension_set(value: str | None) -> frozenset[str]:
+    if not value or not value.strip():
+        return frozenset()
+    extensions: set[str] = set()
+    for item in value.split(","):
+        item = item.strip().casefold()
+        if not item:
+            continue
+        if item == "archives":
+            extensions.update(DEFAULT_ARCHIVE_EXTENSIONS)
+            continue
+        if not item.startswith("."):
+            item = f".{item}"
+        extensions.add(item)
+    return frozenset(extensions)
 
 def parse_telethon_proxy(value: str | None) -> tuple | None:
     if not value or not value.strip():
@@ -618,6 +666,10 @@ async def run_channel_archiver() -> None:
                         source_key=source_key,
                         log_label="Channel",
                         apply_saved_blocks=False,
+                        archive_text=channel_settings.archive_text,
+                        allowed_extensions=channel_settings.allowed_extensions,
+                        password_file=channel_settings.password_file,
+                        strip_archive_passwords=channel_settings.strip_archive_passwords,
                     )
 
             @client.on(events.NewMessage(chats=entities))
@@ -1051,13 +1103,22 @@ async def archive_message(
     source_key: str = "saved",
     log_label: str = "Saved Messages",
     apply_saved_blocks: bool = True,
+    archive_text: bool = True,
+    allowed_extensions: frozenset[str] = frozenset(),
+    password_file: Path | None = None,
+    strip_archive_passwords: bool = False,
 ) -> None:
     ref = media_ref_from_message(message, source_key=source_key)
     if apply_saved_blocks and is_blocked_saved_message(settings, message, ref):
         LOGGER.warning("Blocked %s item skipped: message=%s", log_label, message.id)
         return
 
-    text_path = archive_message_text(database, settings, message, source_key=source_key, log_label=log_label)
+    if ref is not None and allowed_extensions and not media_ref_matches_extensions(ref, allowed_extensions):
+        LOGGER.info("Skipped %s media outside allowed extensions: message=%s name=%s", log_label, message.id, ref.file_name)
+        return
+
+    if archive_text:
+        archive_message_text(database, settings, message, source_key=source_key, log_label=log_label)
     if ref is None:
         return
 
@@ -1094,45 +1155,56 @@ async def archive_message(
         if actual_temp_path is None:
             return
 
-        sha256 = sha256sum(actual_temp_path)
+        processed_temp_path, processed_ref = maybe_strip_archive_password(
+            actual_temp_path,
+            ref,
+            password_file=password_file,
+            enabled=strip_archive_passwords,
+        )
+
+        sha256 = sha256sum(processed_temp_path)
         existing_by_hash = database.get_saved_by_sha256(sha256)
         if existing_by_hash is not None:
-            actual_temp_path.unlink(missing_ok=True)
+            processed_temp_path.unlink(missing_ok=True)
+            if processed_temp_path != actual_temp_path:
+                actual_temp_path.unlink(missing_ok=True)
             database.record_alias(
-                telegram_file_unique_id=ref.file_unique_id,
-                telegram_file_id=ref.file_id,
-                media_type=ref.media_type,
-                latest_name=ref.file_name,
+                telegram_file_unique_id=processed_ref.file_unique_id,
+                telegram_file_id=processed_ref.file_id,
+                media_type=processed_ref.media_type,
+                latest_name=processed_ref.file_name,
                 source_message_id=message.id,
                 file_sha256=existing_by_hash.sha256,
             )
-            record_message_metadata(database, message, ref, existing_by_hash.sha256, existing_by_hash.final_path)
+            record_message_metadata(database, message, processed_ref, existing_by_hash.sha256, existing_by_hash.final_path)
             LOGGER.warning("Duplicate %s media skipped: message=%s path=%s", log_label, message.id, existing_by_hash.final_path)
             return
 
-        final_name = build_storage_name(ref, sha256)
-        target_dir = media_storage_dir(settings.download_dir, ref.media_type)
+        final_name = build_storage_name(processed_ref, sha256)
+        target_dir = media_storage_dir(settings.download_dir, processed_ref.media_type)
         target_dir.mkdir(parents=True, exist_ok=True)
         final_path = unique_target_path(target_dir / final_name)
-        actual_temp_path.replace(final_path)
+        processed_temp_path.replace(final_path)
+        if processed_temp_path != actual_temp_path:
+            actual_temp_path.unlink(missing_ok=True)
 
         try:
             database.record_saved_file(
                 sha256=sha256,
                 final_path=str(final_path),
-                original_name=ref.file_name,
-                media_type=ref.media_type,
-                mime_type=ref.mime_type,
-                file_size=ref.file_size or final_path.stat().st_size,
+                original_name=processed_ref.file_name,
+                media_type=processed_ref.media_type,
+                mime_type=processed_ref.mime_type,
+                file_size=processed_ref.file_size or final_path.stat().st_size,
                 source_chat_id=getattr(message, "chat_id", None),
                 source_message_id=message.id,
                 forwarded_from=describe_forward_source(message),
-                telegram_file_unique_id=ref.file_unique_id,
-                telegram_file_id=ref.file_id,
+                telegram_file_unique_id=processed_ref.file_unique_id,
+                telegram_file_id=processed_ref.file_id,
             )
-            record_message_metadata(database, message, ref, sha256, str(final_path))
+            record_message_metadata(database, message, processed_ref, sha256, str(final_path))
         except Exception:
-            final_path.replace(actual_temp_path)
+            final_path.replace(processed_temp_path)
             raise
         LOGGER.warning("Archived %s media: message=%s path=%s", log_label, message.id, final_path)
     except Exception:
@@ -1167,6 +1239,130 @@ def blocked_keyword_haystack(message: Message, ref: MediaRef | None = None) -> s
         getattr(forward_sender, "last_name", None),
     ]
     return " ".join(str(part).casefold() for part in parts if part is not None)
+
+def media_ref_matches_extensions(ref: MediaRef, allowed_extensions: frozenset[str]) -> bool:
+    if not allowed_extensions:
+        return True
+    file_name = (ref.file_name or "").casefold()
+    if file_name and any(file_name.endswith(extension) for extension in allowed_extensions):
+        return True
+    return ref.extension.casefold() in allowed_extensions
+
+
+def maybe_strip_archive_password(
+    archive_path: Path,
+    ref: MediaRef,
+    *,
+    password_file: Path | None,
+    enabled: bool,
+) -> tuple[Path, MediaRef]:
+    if not enabled:
+        return archive_path, ref
+    if not media_ref_matches_extensions(ref, DEFAULT_ARCHIVE_EXTENSIONS):
+        return archive_path, ref
+    if password_file is None:
+        LOGGER.warning("Archive password stripping is enabled but CHANNEL_ARCHIVE_PASSWORD_FILE is not set")
+        return archive_path, ref
+    if not password_file.exists():
+        LOGGER.warning("Archive password file not found: path=%s", password_file)
+        return archive_path, ref
+
+    seven_zip = shutil.which("7z") or shutil.which("7zz")
+    if seven_zip is None:
+        LOGGER.warning("Archive password stripping requires 7z or 7zz in PATH")
+        return archive_path, ref
+
+    if archive_test_succeeds(seven_zip, archive_path, password=None):
+        LOGGER.info("Archive is not password-protected or can be read without a password: path=%s", archive_path)
+        return archive_path, ref
+
+    passwords = load_archive_passwords(password_file)
+    if not passwords:
+        LOGGER.warning("Archive password file is empty: path=%s", password_file)
+        return archive_path, ref
+
+    for password in passwords:
+        if not archive_test_succeeds(seven_zip, archive_path, password=password):
+            continue
+        unlocked_path = strip_archive_password(seven_zip, archive_path, ref, password)
+        unlocked_ref = MediaRef(
+            media_type=ref.media_type,
+            file_id=ref.file_id,
+            file_unique_id=ref.file_unique_id,
+            file_name=unlocked_archive_name(ref),
+            file_size=unlocked_path.stat().st_size,
+            mime_type="application/zip",
+            extension=".zip",
+        )
+        LOGGER.warning("Removed archive password: source=%s output=%s", archive_path, unlocked_path)
+        return unlocked_path, unlocked_ref
+
+    LOGGER.warning("Encrypted archive kept because no password matched: path=%s", archive_path)
+    return archive_path, ref
+
+
+def load_archive_passwords(password_file: Path) -> list[str]:
+    passwords: list[str] = []
+    for line in password_file.read_text(encoding="utf-8").splitlines():
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        passwords.append(item)
+    return passwords
+
+
+def archive_test_succeeds(seven_zip: str, archive_path: Path, *, password: str | None) -> bool:
+    args = [seven_zip, "t", "-y"]
+    if password is not None:
+        args.append(f"-p{password}")
+    args.append(str(archive_path))
+    result = subprocess.run(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def strip_archive_password(seven_zip: str, archive_path: Path, ref: MediaRef, password: str) -> Path:
+    with tempfile.TemporaryDirectory(prefix="telegram-archive-unlock-") as temp_dir_raw:
+        temp_dir = Path(temp_dir_raw)
+        extract_dir = temp_dir / "contents"
+        extract_dir.mkdir()
+        extract_result = subprocess.run(
+            [seven_zip, "x", "-y", f"-p{password}", f"-o{extract_dir}", str(archive_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+        )
+        if extract_result.returncode != 0:
+            raise RuntimeError(f"failed to extract encrypted archive: {extract_result.stderr.strip()}")
+
+        unlocked_path = archive_path.with_name(f"{archive_path.stem}_unlocked.zip")
+        unlocked_path.unlink(missing_ok=True)
+        pack_result = subprocess.run(
+            [seven_zip, "a", "-tzip", str(unlocked_path), "."],
+            cwd=extract_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+        )
+        if pack_result.returncode != 0:
+            raise RuntimeError(f"failed to repack unlocked archive: {pack_result.stderr.strip()}")
+        return unlocked_path
+
+
+def unlocked_archive_name(ref: MediaRef) -> str:
+    original = sanitize_filename(ref.file_name or ref.media_type)
+    stem = Path(original).stem or "archive"
+    return f"{stem}_unlocked.zip"
+
 
 def resumable_temp_path(temp_dir: Path, message_id: int, ref: MediaRef, *, source_key: str = "saved") -> Path:
     digest = hashlib.sha256(ref.file_id.encode("utf-8")).hexdigest()[:16]

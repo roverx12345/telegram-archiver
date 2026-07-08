@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,8 +21,11 @@ from tele_bot.saved_archiver import (
     has_protected_content,
     is_blocked_saved_message,
     media_ref_from_message,
+    media_ref_matches_extensions,
+    maybe_strip_archive_password,
     normalized_channel_id,
     parse_channel_peer_id,
+    parse_extension_set,
     parse_keyword_set,
     parse_peer_list,
     retry_partial_saved_messages,
@@ -121,6 +126,76 @@ def test_normalized_channel_id_accepts_full_and_internal_ids() -> None:
 
 def test_parse_peer_list_trims_empty_items() -> None:
     assert parse_peer_list(" @one, , -1002683725559 ") == ("@one", "-1002683725559")
+
+
+def test_parse_extension_set_supports_archives_alias() -> None:
+    extensions = parse_extension_set("archives,.cbz, zip")
+
+    assert ".zip" in extensions
+    assert ".rar" in extensions
+    assert ".cbz" in extensions
+
+
+def test_media_ref_matches_multi_part_archive_extension() -> None:
+    ref = MediaRef(
+        media_type="document",
+        file_id="file",
+        file_unique_id="unique",
+        file_name="bundle.tar.gz",
+        file_size=1,
+        mime_type="application/gzip",
+        extension=".gz",
+    )
+
+    assert media_ref_matches_extensions(ref, frozenset({".tar.gz"})) is True
+
+
+def test_maybe_strip_archive_password_repacks_encrypted_zip(tmp_path: Path) -> None:
+    seven_zip = shutil.which("7z") or shutil.which("7zz")
+    if seven_zip is None:
+        pytest.skip("7z is not installed")
+
+    source_file = tmp_path / "plain.txt"
+    source_file.write_text("secret content", encoding="utf-8")
+    encrypted_path = tmp_path / "encrypted.zip"
+    password_file = tmp_path / "passwords.txt"
+    password_file.write_text("wrong\nsecret\n", encoding="utf-8")
+    subprocess.run(
+        [seven_zip, "a", "-tzip", "-psecret", str(encrypted_path), str(source_file.name)],
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    ref = MediaRef(
+        media_type="document",
+        file_id="file",
+        file_unique_id="unique",
+        file_name="encrypted.zip",
+        file_size=encrypted_path.stat().st_size,
+        mime_type="application/zip",
+        extension=".zip",
+    )
+
+    unlocked_path, unlocked_ref = maybe_strip_archive_password(
+        encrypted_path,
+        ref,
+        password_file=password_file,
+        enabled=True,
+    )
+
+    assert unlocked_path != encrypted_path
+    assert unlocked_path.name.endswith("_unlocked.zip")
+    assert unlocked_ref.file_name == "encrypted_unlocked.zip"
+    assert unlocked_ref.mime_type == "application/zip"
+    subprocess.run(
+        [seven_zip, "t", "-y", str(unlocked_path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
 
 
 def test_format_channel_check_result() -> None:

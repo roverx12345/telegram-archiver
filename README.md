@@ -64,10 +64,16 @@ For the channel source, also set:
 CHANNEL_ARCHIVE_PEERS=-1002683725559,@public_channel
 CHANNEL_TELEGRAM_SESSION=./data/channel_archiver.session
 CHANNEL_ARCHIVE_EXISTING=true
+CHANNEL_ARCHIVE_EXTENSIONS=archives
+CHANNEL_ARCHIVE_TEXT=false
+CHANNEL_ARCHIVE_PASSWORD_FILE=./data/channel_passwords.txt
+CHANNEL_STRIP_ARCHIVE_PASSWORDS=true
 CHANNEL_RETRY_PARTIALS_ON_START=true
 CHANNEL_RECENT_SCAN_INTERVAL_SECONDS=900
 CHANNEL_RECENT_SCAN_LIMIT=2000
 ```
+
+`CHANNEL_ARCHIVE_EXTENSIONS=archives` limits channel downloads to common archive files such as `.zip`, `.rar`, `.7z`, and `.tar.gz`. You can also provide an explicit comma-separated list, for example `.zip,.rar,.7z`. The password file is one password per line; blank lines and `#` comments are ignored. When `CHANNEL_STRIP_ARCHIVE_PASSWORDS=true`, newly downloaded encrypted archives are tested against that password file and repacked as unencrypted zip files when a password matches.
 
 ## Run Modes
 
