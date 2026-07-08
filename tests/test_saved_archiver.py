@@ -13,6 +13,7 @@ from tele_bot.saved_archiver import (
     SavedArchiverSettings,
     SavedStats,
     archive_message,
+    classify_archive_exception,
     channel_partial_message_refs,
     download_media_resumable,
     format_channel_check_result,
@@ -218,6 +219,16 @@ def test_format_channel_check_result() -> None:
     assert "protected_content=True" in text
     assert "media_messages=4" in text
     assert "sample_download_status=skipped_protected" in text
+
+
+def test_classify_archive_exception_marks_file_reference_retryable() -> None:
+    exc_type = type("FileReferenceExpiredError", (Exception,), {})
+
+    result = classify_archive_exception(exc_type("expired"))
+
+    assert result.kind == "expired_file_reference"
+    assert result.retryable is True
+    assert "refetching" in result.message
 
 
 def test_has_protected_content_accepts_telethon_flag_names() -> None:

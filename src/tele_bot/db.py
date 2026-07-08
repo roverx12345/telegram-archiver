@@ -37,6 +37,24 @@ class DownloadJob:
     final_path: str | None
     file_sha256: str | None
 
+@dataclass(frozen=True)
+class SourceArchiveFailure:
+    id: int
+    source: str
+    source_message_id: int
+    media_type: str | None
+    original_name: str | None
+    file_size: int | None
+    error_kind: str
+    error_class: str
+    error_message: str
+    retryable: bool
+    temp_path: str | None
+    first_seen_at: str
+    last_seen_at: str
+    attempt_count: int
+    resolved_at: str | None
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -129,6 +147,25 @@ class Database:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(source_chat_id, source_message_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS source_archive_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                source_message_id INTEGER NOT NULL,
+                media_type TEXT,
+                original_name TEXT,
+                file_size INTEGER,
+                error_kind TEXT NOT NULL,
+                error_class TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                retryable INTEGER NOT NULL,
+                temp_path TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                resolved_at TEXT,
+                UNIQUE(source, source_message_id, media_type)
             );
             """
         )
@@ -439,6 +476,18 @@ class Database:
                 mime_type = excluded.mime_type,
                 file_size = excluded.file_size,
                 forwarded_from = excluded.forwarded_from,
+                status = CASE
+                    WHEN download_jobs.status = 'failed' THEN 'pending'
+                    ELSE download_jobs.status
+                END,
+                retry_count = CASE
+                    WHEN download_jobs.status = 'failed' THEN 0
+                    ELSE download_jobs.retry_count
+                END,
+                last_error = CASE
+                    WHEN download_jobs.status = 'failed' THEN NULL
+                    ELSE download_jobs.last_error
+                END,
                 updated_at = excluded.updated_at
             """,
             (
@@ -540,8 +589,8 @@ class Database:
         ).fetchall()
         return {row["status"]: row["count"] for row in rows}
 
-    def start_download_attempt(self, job_id: int) -> DownloadJob:
-        self.connection.execute(
+    def start_download_attempt(self, job_id: int) -> DownloadJob | None:
+        cursor = self.connection.execute(
             """
             UPDATE download_jobs
             SET status = 'downloading',
@@ -549,7 +598,7 @@ class Database:
                 last_error = NULL,
                 updated_at = ?
             WHERE id = ?
-              AND status NOT IN ('completed', 'duplicate')
+              AND status NOT IN ('completed', 'duplicate', 'downloading')
             """,
             (utc_now(), job_id),
         )
@@ -557,6 +606,8 @@ class Database:
         row = self.connection.execute("SELECT * FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             raise LookupError("download job not found")
+        if cursor.rowcount == 0:
+            return None
         return self._download_job_from_row(row)
 
     def mark_job_completed(self, job_id: int, *, final_path: str, file_sha256: str) -> None:
@@ -585,6 +636,102 @@ class Database:
             final_path=None,
             file_sha256=None,
         )
+
+    def record_source_archive_failure(
+        self,
+        *,
+        source: str,
+        source_message_id: int,
+        media_type: str | None,
+        original_name: str | None,
+        file_size: int | None,
+        error_kind: str,
+        error_class: str,
+        error_message: str,
+        retryable: bool,
+        temp_path: str | None,
+    ) -> None:
+        now = utc_now()
+        self.connection.execute(
+            """
+            INSERT INTO source_archive_failures(
+                source,
+                source_message_id,
+                media_type,
+                original_name,
+                file_size,
+                error_kind,
+                error_class,
+                error_message,
+                retryable,
+                temp_path,
+                first_seen_at,
+                last_seen_at,
+                attempt_count,
+                resolved_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)
+            ON CONFLICT(source, source_message_id, media_type) DO UPDATE SET
+                original_name = excluded.original_name,
+                file_size = excluded.file_size,
+                error_kind = excluded.error_kind,
+                error_class = excluded.error_class,
+                error_message = excluded.error_message,
+                retryable = excluded.retryable,
+                temp_path = excluded.temp_path,
+                last_seen_at = excluded.last_seen_at,
+                attempt_count = source_archive_failures.attempt_count + 1,
+                resolved_at = NULL
+            """,
+            (
+                source,
+                source_message_id,
+                media_type,
+                original_name,
+                file_size,
+                error_kind,
+                error_class,
+                error_message,
+                1 if retryable else 0,
+                temp_path,
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+
+    def resolve_source_archive_failure(
+        self,
+        *,
+        source: str,
+        source_message_id: int,
+        media_type: str | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE source_archive_failures
+            SET resolved_at = ?
+            WHERE source = ?
+              AND source_message_id = ?
+              AND COALESCE(media_type, '') = COALESCE(?, '')
+              AND resolved_at IS NULL
+            """,
+            (utc_now(), source, source_message_id, media_type),
+        )
+        self.connection.commit()
+
+    def unresolved_source_archive_failures(self, *, limit: int = 20) -> list[SourceArchiveFailure]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM source_archive_failures
+            WHERE resolved_at IS NULL
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [self._source_archive_failure_from_row(row) for row in rows]
 
     def job_stats(self) -> dict[str, int]:
         rows = self.connection.execute(
@@ -642,4 +789,23 @@ class Database:
             last_error=row["last_error"],
             final_path=row["final_path"],
             file_sha256=row["file_sha256"],
+        )
+
+    def _source_archive_failure_from_row(self, row: sqlite3.Row) -> SourceArchiveFailure:
+        return SourceArchiveFailure(
+            id=row["id"],
+            source=row["source"],
+            source_message_id=row["source_message_id"],
+            media_type=row["media_type"],
+            original_name=row["original_name"],
+            file_size=row["file_size"],
+            error_kind=row["error_kind"],
+            error_class=row["error_class"],
+            error_message=row["error_message"],
+            retryable=bool(row["retryable"]),
+            temp_path=row["temp_path"],
+            first_seen_at=row["first_seen_at"],
+            last_seen_at=row["last_seen_at"],
+            attempt_count=row["attempt_count"],
+            resolved_at=row["resolved_at"],
         )

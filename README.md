@@ -81,6 +81,8 @@ CHANNEL_RECENT_SCAN_LIMIT=2000
 telegram-archiver bot
 telegram-archiver saved
 telegram-archiver channels
+telegram-archiver dashboard
+telegram-archiver health
 telegram-archiver saved-stats
 telegram-archiver channels-list
 telegram-archiver channel-check -1002683725559 --limit 20 --download-sample
@@ -97,6 +99,22 @@ DOWNLOAD_DIR/.tmp/*.part
 The bot source still retries failed downloads from the beginning.
 
 On startup, the Saved Messages source can revisit message IDs parsed from existing `.tmp/saved_<message_id>_*.part` files and resume those partial downloads. The channel source does the same for `.tmp/channel_<channel_id>_<message_id>_*.part` files. Both Telethon sources can periodically rescan recent messages so missed realtime updates are picked up later.
+
+The read-only dashboard shows non-bot source progress from the shared SQLite database and `DOWNLOAD_DIR/.tmp`:
+
+```bash
+telegram-archiver dashboard
+```
+
+By default it listens on `127.0.0.1:8765`. Configure it with `DASHBOARD_HOST`, `DASHBOARD_PORT`, `DASHBOARD_REFRESH_SECONDS`, `DASHBOARD_ACTIVE_PARTIAL_SECONDS`, and `DASHBOARD_STALE_PARTIAL_DAYS`.
+
+For a terminal-only check, run:
+
+```bash
+telegram-archiver health
+```
+
+Saved Messages and channel download failures are recorded in SQLite and marked resolved when the same message later archives successfully. The dashboard and health command report unresolved failures separately from active `.part` downloads.
 
 Stale partial files can be reviewed and cleaned with:
 

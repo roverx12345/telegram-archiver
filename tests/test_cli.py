@@ -14,6 +14,8 @@ def test_cli_help_lists_sources(capsys: pytest.CaptureFixture[str]) -> None:
     assert "bot" in output
     assert "saved" in output
     assert "channels" in output
+    assert "dashboard" in output
+    assert "health" in output
     assert "saved-stats" in output
     assert "channels-list" in output
     assert "channel-check" in output

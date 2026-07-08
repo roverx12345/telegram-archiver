@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .bot import build_application
 from .config import load_download_dir, load_settings
+from .dashboard import run_dashboard, run_health
 from .db import Database
 from .saved_archiver import run_archiver, run_channel_archiver, run_channel_check, run_channels_list, run_saved_stats
 from .tmp_cleanup import clean_tmp_part_files, format_tmp_cleanup_result
@@ -23,6 +24,8 @@ def main(argv: list[str] | None = None) -> None:
     subparsers.add_parser("bot", help="Run the forward-to-bot source.")
     subparsers.add_parser("saved", help="Run the Saved Messages source.")
     subparsers.add_parser("channels", help="Run the configured channel archiver source.")
+    subparsers.add_parser("dashboard", help="Run the read-only HTML monitor for non-bot sources.")
+    subparsers.add_parser("health", help="Print a read-only health summary for non-bot archive state.")
     saved_stats_parser = subparsers.add_parser("saved-stats", help="Scan Saved Messages and print download candidate counts.")
     saved_stats_parser.add_argument("--limit", type=int, default=None, help="Only scan the newest N Saved Messages.")
     saved_stats_parser.add_argument("--progress-every", type=int, default=1000, help="Log progress every N scanned messages.")
@@ -48,6 +51,10 @@ def main(argv: list[str] | None = None) -> None:
         run_saved_source()
     elif source == "channels":
         run_channels_source()
+    elif source == "dashboard":
+        run_dashboard()
+    elif source == "health":
+        raise SystemExit(run_health())
     elif source == "saved-stats":
         asyncio.run(run_saved_stats(limit=args.limit, progress_every=args.progress_every))
     elif source == "channels-list":

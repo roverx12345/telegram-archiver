@@ -114,6 +114,8 @@ telegram-archiver bot
 telegram-archiver bot
 telegram-archiver saved
 telegram-archiver channels
+telegram-archiver dashboard
+telegram-archiver health
 telegram-archiver saved-stats
 telegram-archiver channels-list
 telegram-archiver channel-check -1002683725559 --limit 20 --download-sample
@@ -137,6 +139,22 @@ CHANNEL_RECENT_SCAN_LIMIT=2000
 `CHANNEL_TELEGRAM_SESSION` 默认使用独立 session，适合和 `saved-archiver` 同时运行。第一次运行 `telegram-archiver channels` 可能需要登录这个 session。频道如果返回 protected 内容标记，归档器会跳过。
 
 `CHANNEL_ARCHIVE_EXTENSIONS=archives` 表示只下载常见压缩包，例如 `.zip/.rar/.7z/.tar.gz`。也可以写成逗号分隔的扩展名列表，例如 `.zip,.rar,.7z`。密码库文件一行一个密码，空行和 `#` 开头的注释会被忽略；启用 `CHANNEL_STRIP_ARCHIVE_PASSWORDS=true` 后，新下载的加密压缩包会用密码库尝试解密，成功后保存为无密码 zip。
+
+非 bot 归档监控面板：
+
+```bash
+telegram-archiver dashboard
+```
+
+面板默认监听 `127.0.0.1:8765`，只读展示 Saved Messages / channels 的归档数量、体积、最近完成记录和 `.part` 半成品状态。可通过 `DASHBOARD_HOST`、`DASHBOARD_PORT`、`DASHBOARD_REFRESH_SECONDS`、`DASHBOARD_ACTIVE_PARTIAL_SECONDS`、`DASHBOARD_STALE_PARTIAL_DAYS` 调整监听和刷新策略。
+
+终端健康检查：
+
+```bash
+telegram-archiver health
+```
+
+Saved Messages 和 channels 的下载失败会写入 SQLite；同一条消息后续归档成功时会自动标记为已解决。监控面板和 `health` 会把未解决失败与活跃 `.part` 下载分开展示。
 
 只统计 Saved Messages 待处理数量、不下载：
 

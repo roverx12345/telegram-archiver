@@ -7,7 +7,7 @@ services:
     init: true
     command: ["telegram-archiver", "bot"]
     volumes:
-      - /srv/nas/nasdata/telegram-forward-archiver-bot/downloads:/app/downloads
+      - /srv/nas/nasdata/saved-archiver:/app/downloads
       - ./data:/app/data
     restart: unless-stopped
   saved-archiver:
@@ -18,6 +18,22 @@ services:
     init: true
     command: ["telegram-archiver", "saved"]
     volumes:
-      - /srv/nas/nasdata/telegram-forward-archiver-bot/downloads:/app/downloads
+      - /srv/nas/nasdata/saved-archiver:/app/downloads
       - ./data:/app/data
+    restart: unless-stopped
+  dashboard:
+    user: "1000:1000"
+    build: .
+    env_file:
+      - .env
+    environment:
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: 8765
+    init: true
+    command: ["telegram-archiver", "dashboard"]
+    volumes:
+      - /srv/nas/nasdata/saved-archiver:/app/downloads:ro
+      - ./data:/app/data:ro
+    ports:
+      - "127.0.0.1:8765:8765"
     restart: unless-stopped

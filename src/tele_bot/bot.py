@@ -28,6 +28,8 @@ def build_application(settings: Settings, database: Database) -> Application:
     if settings.local_bot_api_url:
         base = settings.local_bot_api_url.rstrip("/")
         builder = builder.base_url(f"{base}/bot").base_file_url(f"{base}/file/bot")
+    if settings.bot_proxy_url:
+        builder = builder.proxy_url(settings.bot_proxy_url).get_updates_proxy_url(settings.bot_proxy_url)
     builder = builder.post_init(post_init)
     application = builder.build()
     application.bot_data["settings"] = settings
@@ -275,6 +277,10 @@ async def process_download_job(
         return
 
     started_job = database.start_download_attempt(job.id)
+    if started_job is None:
+        await notifier("这条消息对应的下载任务已经在处理中或已处理完成。")
+        return
+
     prefix = "恢复下载" if recovery_mode else "开始下载"
     await notifier(
         f"{prefix} {media.file_name or media.media_type}（第 {started_job.retry_count} 次尝试）"
@@ -311,20 +317,24 @@ async def process_download_job(
         final_path = unique_target_path(target_dir / final_name)
         temp_path.replace(final_path)
 
-        database.record_saved_file(
-            sha256=sha256,
-            final_path=str(final_path),
-            original_name=media.file_name,
-            media_type=media.media_type,
-            mime_type=media.mime_type,
-            file_size=media.file_size or final_path.stat().st_size,
-            source_chat_id=job.source_chat_id,
-            source_message_id=job.source_message_id,
-            forwarded_from=job.forwarded_from,
-            telegram_file_unique_id=media.file_unique_id,
-            telegram_file_id=media.file_id,
-        )
-        database.mark_job_completed(job.id, final_path=str(final_path), file_sha256=sha256)
+        try:
+            database.record_saved_file(
+                sha256=sha256,
+                final_path=str(final_path),
+                original_name=media.file_name,
+                media_type=media.media_type,
+                mime_type=media.mime_type,
+                file_size=media.file_size or final_path.stat().st_size,
+                source_chat_id=job.source_chat_id,
+                source_message_id=job.source_message_id,
+                forwarded_from=job.forwarded_from,
+                telegram_file_unique_id=media.file_unique_id,
+                telegram_file_id=media.file_id,
+            )
+            database.mark_job_completed(job.id, final_path=str(final_path), file_sha256=sha256)
+        except Exception:
+            final_path.replace(temp_path)
+            raise
 
         await notifier(f"下载完成。\nsha256: {sha256}\n保存到: {final_path}")
     except Exception as exc:  # pragma: no cover - network errors are integration-level failures
@@ -376,7 +386,7 @@ async def require_authorized_private_chat(update: Update, context: ContextTypes.
 
     if not is_authorized(settings, database, user.id, chat.id):
         await message.reply_text("当前会话尚未配对，请先发送 `/pair <配对码>`。", parse_mode="Markdown")
-        return message, chat, None
+        return message, None, None
 
     return message, chat, user
 

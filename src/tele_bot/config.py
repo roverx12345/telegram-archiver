@@ -20,6 +20,7 @@ class Settings:
     download_dir: Path
     db_path: Path
     local_bot_api_url: str | None
+    bot_proxy_url: str | None
     log_level: str
     allow_unpaired_private: bool
     max_download_retries: int
@@ -44,6 +45,7 @@ def load_settings() -> Settings:
 
     pair_code = os.getenv("PAIR_CODE", "").strip() or None
     local_bot_api_url = os.getenv("LOCAL_BOT_API_URL", "").strip() or None
+    bot_proxy_url = os.getenv("BOT_PROXY_URL", "").strip() or None
 
     return Settings(
         bot_token=bot_token,
@@ -51,6 +53,7 @@ def load_settings() -> Settings:
         download_dir=download_dir,
         db_path=db_path,
         local_bot_api_url=local_bot_api_url,
+        bot_proxy_url=bot_proxy_url,
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         allow_unpaired_private=_to_bool(os.getenv("ALLOW_UNPAIRED_PRIVATE"), default=False),
         max_download_retries=max(1, int(os.getenv("MAX_DOWNLOAD_RETRIES", "3"))),

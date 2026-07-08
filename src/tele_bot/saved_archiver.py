@@ -87,6 +87,12 @@ class SavedStats:
     download_candidates: int = 0
 
 @dataclass(frozen=True)
+class ArchiveErrorClassification:
+    kind: str
+    retryable: bool
+    message: str
+
+@dataclass(frozen=True)
 class ChannelInfo:
     id: int | None
     title: str
@@ -1109,6 +1115,7 @@ async def archive_message(
     strip_archive_passwords: bool = False,
 ) -> None:
     ref = media_ref_from_message(message, source_key=source_key)
+    source = archive_source_name(source_key)
     if apply_saved_blocks and is_blocked_saved_message(settings, message, ref):
         LOGGER.warning("Blocked %s item skipped: message=%s", log_label, message.id)
         return
@@ -1124,6 +1131,7 @@ async def archive_message(
 
     existing = database.get_saved_by_unique_id(ref.file_unique_id)
     if existing is not None:
+        database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=ref.media_type)
         LOGGER.info("%s message %s already archived at %s", log_label, message.id, existing.final_path)
         return
 
@@ -1138,6 +1146,7 @@ async def archive_message(
             file_sha256=existing_by_file_id.sha256,
         )
         record_message_metadata(database, message, ref, existing_by_file_id.sha256, existing_by_file_id.final_path)
+        database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=ref.media_type)
         LOGGER.warning(
             "Duplicate %s media skipped before download: message=%s path=%s",
             log_label,
@@ -1177,6 +1186,7 @@ async def archive_message(
                 file_sha256=existing_by_hash.sha256,
             )
             record_message_metadata(database, message, processed_ref, existing_by_hash.sha256, existing_by_hash.final_path)
+            database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=processed_ref.media_type)
             LOGGER.warning("Duplicate %s media skipped: message=%s path=%s", log_label, message.id, existing_by_hash.final_path)
             return
 
@@ -1203,13 +1213,53 @@ async def archive_message(
                 telegram_file_id=processed_ref.file_id,
             )
             record_message_metadata(database, message, processed_ref, sha256, str(final_path))
+            database.resolve_source_archive_failure(source=source, source_message_id=message.id, media_type=processed_ref.media_type)
         except Exception:
             final_path.replace(processed_temp_path)
             raise
         LOGGER.warning("Archived %s media: message=%s path=%s", log_label, message.id, final_path)
-    except Exception:
+    except Exception as exc:
         # Keep the .part file so the next source run can resume it.
+        classification = classify_archive_exception(exc)
+        database.record_source_archive_failure(
+            source=source,
+            source_message_id=message.id,
+            media_type=ref.media_type,
+            original_name=ref.file_name,
+            file_size=ref.file_size,
+            error_kind=classification.kind,
+            error_class=exc.__class__.__name__,
+            error_message=classification.message,
+            retryable=classification.retryable,
+            temp_path=str(temp_path),
+        )
         LOGGER.exception("Failed to archive %s media: message=%s", log_label, message.id)
+
+def archive_source_name(source_key: str) -> str:
+    return "channels" if source_key.startswith("channel_") else "saved"
+
+def classify_archive_exception(exc: Exception) -> ArchiveErrorClassification:
+    error_class = exc.__class__.__name__
+    raw_message = str(exc).strip()
+    message = raw_message or error_class
+    if error_class == "FileReferenceExpiredError":
+        return ArchiveErrorClassification(
+            kind="expired_file_reference",
+            retryable=True,
+            message=(
+                "Telegram file reference expired. A later retry can work after refetching the message; "
+                "self-destructing or inaccessible media may keep failing."
+            ),
+        )
+    if "FloodWait" in error_class:
+        return ArchiveErrorClassification(kind="rate_limited", retryable=True, message=message)
+    if error_class in {"TimeoutError", "ConnectionError"} or "Network" in error_class:
+        return ArchiveErrorClassification(kind="network", retryable=True, message=message)
+    if error_class == "RuntimeError" and "incomplete download" in raw_message:
+        return ArchiveErrorClassification(kind="incomplete_download", retryable=True, message=message)
+    if isinstance(exc, OSError):
+        return ArchiveErrorClassification(kind="filesystem", retryable=True, message=message)
+    return ArchiveErrorClassification(kind="unknown", retryable=True, message=message)
 
 def is_blocked_saved_message(
     settings: SavedArchiverSettings,

@@ -135,3 +135,105 @@ def test_list_jobs_and_retryable_failed_jobs(tmp_path: Path) -> None:
     stats = db.chat_job_stats(99)
     assert stats["failed"] == 2
     assert stats["completed"] == 1
+
+
+
+def test_failed_job_reforward_resets_retry_state(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+    job = db.create_or_get_download_job(
+        source_chat_id=1,
+        source_message_id=2,
+        requester_user_id=3,
+        telegram_file_id="file-id",
+        telegram_file_unique_id="unique-id",
+        media_type="video",
+        original_name="clip.mp4",
+        mime_type="video/mp4",
+        file_size=123,
+        forwarded_from="chat",
+    )
+    for _ in range(3):
+        db.start_download_attempt(job.id)
+        db.mark_job_failed(job.id, error="network")
+
+    reset = db.create_or_get_download_job(
+        source_chat_id=1,
+        source_message_id=2,
+        requester_user_id=4,
+        telegram_file_id="new-file-id",
+        telegram_file_unique_id="new-unique-id",
+        media_type="video",
+        original_name="clip-new.mp4",
+        mime_type="video/mp4",
+        file_size=456,
+        forwarded_from="chat",
+    )
+
+    assert reset.id == job.id
+    assert reset.status == "pending"
+    assert reset.retry_count == 0
+    assert reset.last_error is None
+    assert reset.telegram_file_id == "new-file-id"
+
+
+def test_downloading_job_is_not_started_twice(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+    job = db.create_or_get_download_job(
+        source_chat_id=1,
+        source_message_id=2,
+        requester_user_id=3,
+        telegram_file_id="file-id",
+        telegram_file_unique_id="unique-id",
+        media_type="video",
+        original_name="clip.mp4",
+        mime_type="video/mp4",
+        file_size=123,
+        forwarded_from="chat",
+    )
+
+    first = db.start_download_attempt(job.id)
+    second = db.start_download_attempt(job.id)
+
+    assert first is not None
+    assert first.status == "downloading"
+    assert second is None
+    assert db.get_download_job(1, 2).retry_count == 1
+
+
+def test_source_archive_failure_lifecycle(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+    db.record_source_archive_failure(
+        source="saved",
+        source_message_id=123,
+        media_type="video",
+        original_name="clip.mp4",
+        file_size=456,
+        error_kind="expired_file_reference",
+        error_class="FileReferenceExpiredError",
+        error_message="expired",
+        retryable=True,
+        temp_path="/tmp/clip.part",
+    )
+    db.record_source_archive_failure(
+        source="saved",
+        source_message_id=123,
+        media_type="video",
+        original_name="clip.mp4",
+        file_size=456,
+        error_kind="network",
+        error_class="TimeoutError",
+        error_message="timeout",
+        retryable=True,
+        temp_path="/tmp/clip.part",
+    )
+
+    failures = db.unresolved_source_archive_failures()
+
+    assert len(failures) == 1
+    assert failures[0].attempt_count == 2
+    assert failures[0].error_kind == "network"
+    assert failures[0].retryable is True
+
+    db.resolve_source_archive_failure(source="saved", source_message_id=123, media_type="video")
+
+    assert db.unresolved_source_archive_failures() == []
