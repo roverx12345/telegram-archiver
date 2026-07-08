@@ -143,6 +143,7 @@ class ChannelArchiverSettings:
     archive_text: bool
     password_file: Path | None
     strip_archive_passwords: bool
+    try_protected_content: bool
 
 def load_saved_archiver_settings() -> SavedArchiverSettings:
     load_dotenv()
@@ -252,6 +253,7 @@ def load_channel_archiver_settings() -> ChannelArchiverSettings:
         archive_text=_to_bool(os.getenv("CHANNEL_ARCHIVE_TEXT"), default=True),
         password_file=password_file,
         strip_archive_passwords=_to_bool(os.getenv("CHANNEL_STRIP_ARCHIVE_PASSWORDS"), default=False),
+        try_protected_content=_to_bool(os.getenv("CHANNEL_TRY_PROTECTED_CONTENT"), default=False),
     )
 
 
@@ -664,11 +666,18 @@ async def run_channel_archiver() -> None:
             for peer in channel_settings.peers:
                 entity = await resolve_channel_entity(client, peer)
                 info = channel_info_from_entity(entity)
-                if info.protected_content:
+                if info.protected_content and not channel_settings.try_protected_content:
                     LOGGER.warning("Protected channel skipped: peer=%s title=%s", peer, info.title)
                     continue
+                if info.protected_content:
+                    LOGGER.warning(
+                        "Protected channel configured for local download attempt: peer=%s title=%s",
+                        full_channel_peer_id(info.id),
+                        info.title,
+                    )
+                else:
+                    LOGGER.warning("Configured channel: peer=%s title=%s", full_channel_peer_id(info.id), info.title)
                 entities.append(entity)
-                LOGGER.warning("Configured channel: peer=%s title=%s", full_channel_peer_id(info.id), info.title)
 
             if not entities:
                 raise RuntimeError("no usable channels configured")
@@ -679,13 +688,19 @@ async def run_channel_archiver() -> None:
 
             async def archive_one(message: Message) -> None:
                 async with archive_lock:
-                    if has_protected_content(message):
+                    if has_protected_content(message) and not channel_settings.try_protected_content:
                         LOGGER.warning(
                             "Protected channel message skipped: chat=%s message=%s",
                             getattr(message, "chat_id", None),
                             message.id,
                         )
                         return
+                    if has_protected_content(message):
+                        LOGGER.warning(
+                            "Protected channel message local download attempt: chat=%s message=%s",
+                            getattr(message, "chat_id", None),
+                            message.id,
+                        )
                     channel_id = normalized_channel_id(getattr(message, "chat_id", None))
                     source_key = f"channel_{channel_id}"
                     await archive_message(
@@ -804,6 +819,7 @@ async def run_channel_check(
     limit: int = 20,
     download_sample: bool = False,
     max_sample_bytes: int = 50 * 1024 * 1024,
+    try_protected_content: bool = False,
 ) -> None:
     settings = load_telethon_session_settings()
     logging.basicConfig(
@@ -826,6 +842,7 @@ async def run_channel_check(
                 limit=limit,
                 download_sample=download_sample,
                 max_sample_bytes=max_sample_bytes,
+                try_protected_content=try_protected_content,
             )
             print(format_channel_check_result(result))
     except sqlite3.OperationalError as exc:
@@ -863,6 +880,7 @@ async def check_channel(
     limit: int = 20,
     download_sample: bool = False,
     max_sample_bytes: int = 50 * 1024 * 1024,
+    try_protected_content: bool = False,
 ) -> ChannelCheckResult:
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
@@ -886,14 +904,14 @@ async def check_channel(
             continue
 
         media_messages += 1
-        if sample_message is None and not message_protected:
+        if sample_message is None and (try_protected_content or not message_protected):
             sample_message = message
             sample_ref = ref
 
     sample_download_status = "not_requested"
     sample_download_detail = "pass --download-sample to try one temporary media download"
     if download_sample:
-        if info.protected_content or protected_messages:
+        if (info.protected_content or protected_messages) and not try_protected_content:
             sample_download_status = "skipped_protected"
             sample_download_detail = "protected content flag found on channel or sampled messages"
         elif sample_message is None or sample_ref is None:

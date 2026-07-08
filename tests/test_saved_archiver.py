@@ -21,6 +21,7 @@ from tele_bot.saved_archiver import (
     format_channel_list,
     format_saved_stats,
     has_protected_content,
+    load_channel_archiver_settings,
     is_blocked_saved_message,
     media_ref_from_message,
     media_ref_matches_extensions,
@@ -315,6 +316,20 @@ def test_maybe_strip_archive_password_merges_split_zip(tmp_path: Path) -> None:
         check=True,
     )
 
+
+def test_load_channel_archiver_settings_try_protected_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setenv("CHANNEL_ARCHIVE_PEERS", "-1003018373376")
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "downloads"))
+    monkeypatch.setenv("TEXT_DOWNLOAD_DIR", str(tmp_path / "texts"))
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "bot.db"))
+    monkeypatch.setenv("CHANNEL_TELEGRAM_SESSION", str(tmp_path / "channel.session"))
+    monkeypatch.setenv("CHANNEL_TRY_PROTECTED_CONTENT", "true")
+
+    settings = load_channel_archiver_settings()
+
+    assert settings.try_protected_content is True
 
 def test_format_channel_check_result() -> None:
     text = format_channel_check_result(

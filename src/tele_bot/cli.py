@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> None:
     channel_check_parser.add_argument("peer", help="Channel username, invite-resolved name, or numeric peer id.")
     channel_check_parser.add_argument("--limit", type=int, default=20, help="Scan the newest N messages.")
     channel_check_parser.add_argument("--download-sample", action="store_true", help="Try one temporary media download when no protection flag is found.")
+    channel_check_parser.add_argument("--try-protected", action="store_true", help="Also try the temporary sample download for protected channels/messages.")
     channel_check_parser.add_argument("--max-sample-mb", type=int, default=50, help="Skip sample download if the media is larger than this many MiB.")
     clean_tmp_parser = subparsers.add_parser("clean-tmp", help="Clean stale resumable .part files from DOWNLOAD_DIR/.tmp.")
     clean_tmp_parser.add_argument("--older-than-days", type=float, default=30.0, help="Only clean .part files older than this many days.")
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> None:
                 limit=args.limit,
                 download_sample=args.download_sample,
                 max_sample_bytes=args.max_sample_mb * 1024 * 1024,
+                try_protected_content=args.try_protected,
             )
         )
     elif source == "clean-tmp":
