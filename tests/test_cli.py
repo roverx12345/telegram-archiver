@@ -13,7 +13,10 @@ def test_cli_help_lists_sources(capsys: pytest.CaptureFixture[str]) -> None:
     output = capsys.readouterr().out
     assert "bot" in output
     assert "saved" in output
+    assert "channels" in output
     assert "saved-stats" in output
+    assert "channels-list" in output
+    assert "channel-check" in output
     assert "clean-tmp" in output
     assert "all" in output
 
@@ -37,6 +40,27 @@ def test_clean_tmp_help_lists_delete(capsys: pytest.CaptureFixture[str]) -> None
     assert "--older-than-days" in output
     assert "--download-dir" in output
     assert "--delete" in output
+
+
+def test_channels_list_help_lists_options(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["channels-list", "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "--include-groups" in output
+    assert "--limit" in output
+
+
+def test_channel_check_help_lists_options(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["channel-check", "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "--limit" in output
+    assert "--download-sample" in output
+    assert "--max-sample-mb" in output
 
 
 def test_clean_tmp_uses_download_dir_without_bot_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

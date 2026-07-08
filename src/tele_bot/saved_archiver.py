@@ -5,8 +5,10 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
 import sqlite3
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -26,6 +28,8 @@ from .media import (
 )
 
 LOGGER = logging.getLogger(__name__)
+SAVED_PARTIAL_NAME_RE = re.compile(r"^saved_(\d+)_.*\.part$")
+CHANNEL_PARTIAL_NAME_RE = re.compile(r"^channel_(-?\d+)_(\d+)_.*\.part$")
 
 @dataclass(frozen=True)
 class SavedArchiverSettings:
@@ -37,7 +41,21 @@ class SavedArchiverSettings:
     db_path: Path
     log_level: str
     archive_existing: bool
+    scan_progress_every: int
+    recent_scan_interval_seconds: int
+    recent_scan_limit: int
+    retry_partials_on_start: bool
+    retry_partials_limit: int
     blocked_forward_chat_ids: frozenset[int]
+    blocked_forward_keywords: frozenset[str]
+    proxy: tuple | None
+
+@dataclass(frozen=True)
+class TelethonSessionSettings:
+    api_id: int
+    api_hash: str
+    session_path: Path
+    log_level: str
     proxy: tuple | None
 
 @dataclass(frozen=True)
@@ -48,6 +66,33 @@ class SavedStats:
     already_archived_by_unique_id: int = 0
     already_archived_by_file_id: int = 0
     download_candidates: int = 0
+
+@dataclass(frozen=True)
+class ChannelInfo:
+    id: int | None
+    title: str
+    username: str | None
+    broadcast: bool
+    megagroup: bool
+    protected_content: bool
+
+@dataclass(frozen=True)
+class ChannelCheckResult:
+    peer: str
+    id: int | None
+    title: str
+    username: str | None
+    protected_content: bool
+    scanned_messages: int
+    media_messages: int
+    protected_messages: int
+    sample_download_status: str
+    sample_download_detail: str
+
+@dataclass(frozen=True)
+class ChannelArchiverSettings:
+    archive: SavedArchiverSettings
+    peers: tuple[str, ...]
 
 def load_saved_archiver_settings() -> SavedArchiverSettings:
     load_dotenv()
@@ -76,9 +121,80 @@ def load_saved_archiver_settings() -> SavedArchiverSettings:
         db_path=db_path,
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         archive_existing=_to_bool(os.getenv("SAVED_ARCHIVE_EXISTING"), default=True),
+        scan_progress_every=max(0, int(os.getenv("SAVED_SCAN_PROGRESS_EVERY", "1000"))),
+        recent_scan_interval_seconds=max(0, int(os.getenv("SAVED_RECENT_SCAN_INTERVAL_SECONDS", "900"))),
+        recent_scan_limit=max(0, int(os.getenv("SAVED_RECENT_SCAN_LIMIT", "2000"))),
+        retry_partials_on_start=_to_bool(os.getenv("SAVED_RETRY_PARTIALS_ON_START"), default=True),
+        retry_partials_limit=max(0, int(os.getenv("SAVED_RETRY_PARTIALS_LIMIT", "0"))),
         blocked_forward_chat_ids=parse_int_set(os.getenv("SAVED_BLOCKED_FORWARD_CHAT_IDS")),
+        blocked_forward_keywords=parse_keyword_set(os.getenv("SAVED_BLOCKED_FORWARD_KEYWORDS")),
         proxy=parse_telethon_proxy(os.getenv("TELETHON_PROXY")),
     )
+
+
+def load_telethon_session_settings() -> TelethonSessionSettings:
+    load_dotenv()
+
+    api_id_raw = os.getenv("TELEGRAM_API_ID", "").strip()
+    api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+    if not api_id_raw or not api_hash:
+        raise RuntimeError("TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
+
+    session_path = Path(os.getenv("TELEGRAM_SESSION", "./data/saved_messages.session")).expanduser().resolve()
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return TelethonSessionSettings(
+        api_id=int(api_id_raw),
+        api_hash=api_hash,
+        session_path=session_path,
+        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        proxy=parse_telethon_proxy(os.getenv("TELETHON_PROXY")),
+    )
+
+
+def load_channel_archiver_settings() -> ChannelArchiverSettings:
+    load_dotenv()
+
+    api_id_raw = os.getenv("TELEGRAM_API_ID", "").strip()
+    api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+    if not api_id_raw or not api_hash:
+        raise RuntimeError("TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
+
+    peers = parse_peer_list(os.getenv("CHANNEL_ARCHIVE_PEERS"))
+    if not peers:
+        raise RuntimeError("CHANNEL_ARCHIVE_PEERS is required for telegram-archiver channels")
+
+    download_dir = Path(os.getenv("DOWNLOAD_DIR", "./downloads")).expanduser().resolve()
+    text_dir = Path(os.getenv("TEXT_DOWNLOAD_DIR", str(download_dir / "texts"))).expanduser().resolve()
+    db_path = Path(os.getenv("DB_PATH", "./data/bot.db")).expanduser().resolve()
+    session_default = os.getenv("TELEGRAM_SESSION", "./data/saved_messages.session")
+    session_path = Path(os.getenv("CHANNEL_TELEGRAM_SESSION", "./data/channel_archiver.session") or session_default).expanduser().resolve()
+
+    download_dir.mkdir(parents=True, exist_ok=True)
+    text_dir.mkdir(parents=True, exist_ok=True)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+
+    archive = SavedArchiverSettings(
+        api_id=int(api_id_raw),
+        api_hash=api_hash,
+        session_path=session_path,
+        download_dir=download_dir,
+        text_dir=text_dir,
+        db_path=db_path,
+        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        archive_existing=_to_bool(os.getenv("CHANNEL_ARCHIVE_EXISTING"), default=True),
+        scan_progress_every=max(0, int(os.getenv("CHANNEL_SCAN_PROGRESS_EVERY", os.getenv("SAVED_SCAN_PROGRESS_EVERY", "1000")))),
+        recent_scan_interval_seconds=max(0, int(os.getenv("CHANNEL_RECENT_SCAN_INTERVAL_SECONDS", "900"))),
+        recent_scan_limit=max(0, int(os.getenv("CHANNEL_RECENT_SCAN_LIMIT", "2000"))),
+        retry_partials_on_start=_to_bool(os.getenv("CHANNEL_RETRY_PARTIALS_ON_START"), default=True),
+        retry_partials_limit=max(0, int(os.getenv("CHANNEL_RETRY_PARTIALS_LIMIT", "0"))),
+        blocked_forward_chat_ids=frozenset(),
+        blocked_forward_keywords=frozenset(),
+        proxy=parse_telethon_proxy(os.getenv("TELETHON_PROXY")),
+    )
+    return ChannelArchiverSettings(archive=archive, peers=peers)
+
 
 def _to_bool(value: str | None, default: bool = False) -> bool:
     if value is None:
@@ -94,6 +210,16 @@ def parse_int_set(value: str | None) -> frozenset[int]:
         if item:
             ids.add(int(item))
     return frozenset(ids)
+
+def parse_keyword_set(value: str | None) -> frozenset[str]:
+    if not value or not value.strip():
+        return frozenset()
+    return frozenset(item.strip().casefold() for item in value.split(",") if item.strip())
+
+def parse_peer_list(value: str | None) -> tuple[str, ...]:
+    if not value or not value.strip():
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 def parse_telethon_proxy(value: str | None) -> tuple | None:
     if not value or not value.strip():
@@ -121,6 +247,264 @@ def parse_telethon_proxy(value: str | None) -> tuple | None:
     rdns = parsed.scheme.lower() == "socks5h"
     return (proxy_type, parsed.hostname, parsed.port, rdns, parsed.username, parsed.password)
 
+async def scan_existing_saved_messages(
+    client: TelegramClient,
+    database: Database,
+    settings: SavedArchiverSettings,
+    *,
+    archive_one: Callable[[Message], Awaitable[None]] | None = None,
+) -> None:
+    LOGGER.warning("Scanning existing Saved Messages media")
+    scanned = 0
+    async for message in client.iter_messages("me", reverse=True):
+        scanned += 1
+        await archive_saved_message(client, database, settings, message, archive_one=archive_one)
+        if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
+            LOGGER.warning("Saved Messages scan progress: scanned=%s", scanned)
+    LOGGER.warning("Existing Saved Messages scan finished: scanned=%s", scanned)
+
+
+async def scan_recent_saved_messages(
+    client: TelegramClient,
+    database: Database,
+    settings: SavedArchiverSettings,
+    *,
+    limit: int,
+    archive_one: Callable[[Message], Awaitable[None]] | None = None,
+) -> None:
+    if limit <= 0:
+        return
+
+    LOGGER.warning("Scanning recent Saved Messages media: limit=%s", limit)
+    scanned = 0
+    async for message in client.iter_messages("me", limit=limit):
+        scanned += 1
+        await archive_saved_message(client, database, settings, message, archive_one=archive_one)
+        if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
+            LOGGER.warning("Recent Saved Messages scan progress: scanned=%s limit=%s", scanned, limit)
+    LOGGER.warning("Recent Saved Messages scan finished: scanned=%s limit=%s", scanned, limit)
+
+
+async def retry_partial_saved_messages(
+    client: TelegramClient,
+    database: Database,
+    settings: SavedArchiverSettings,
+    *,
+    archive_one: Callable[[Message], Awaitable[None]] | None = None,
+) -> None:
+    message_ids = saved_partial_message_ids(settings.download_dir / ".tmp", limit=settings.retry_partials_limit)
+    if not message_ids:
+        LOGGER.warning("No Saved Messages partial downloads found to retry")
+        return
+
+    LOGGER.warning("Retrying Saved Messages partial downloads: count=%s", len(message_ids))
+    scanned = 0
+    for index in range(0, len(message_ids), 100):
+        batch = message_ids[index:index + 100]
+        messages = await client.get_messages("me", ids=batch)
+        if not isinstance(messages, list):
+            messages = [messages]
+        for message in messages:
+            if message is None:
+                continue
+            scanned += 1
+            await archive_saved_message(client, database, settings, message, archive_one=archive_one)
+            if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
+                LOGGER.warning("Saved Messages partial retry progress: scanned=%s total=%s", scanned, len(message_ids))
+    LOGGER.warning("Saved Messages partial retry finished: scanned=%s total=%s", scanned, len(message_ids))
+
+
+def saved_partial_message_ids(temp_dir: Path, *, limit: int = 0) -> list[int]:
+    if not temp_dir.exists():
+        return []
+
+    partials: list[tuple[float, int]] = []
+    for path in temp_dir.glob("saved_*.part"):
+        match = SAVED_PARTIAL_NAME_RE.match(path.name)
+        if match is None:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        partials.append((mtime, int(match.group(1))))
+
+    seen: set[int] = set()
+    message_ids: list[int] = []
+    for _, message_id in sorted(partials):
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        message_ids.append(message_id)
+        if limit > 0 and len(message_ids) >= limit:
+            break
+    return message_ids
+
+
+async def archive_saved_message(
+    client: TelegramClient,
+    database: Database,
+    settings: SavedArchiverSettings,
+    message: Message,
+    *,
+    archive_one: Callable[[Message], Awaitable[None]] | None = None,
+) -> None:
+    if archive_one is not None:
+        await archive_one(message)
+    else:
+        await archive_message(client, database, settings, message)
+
+
+async def periodic_recent_scan_loop(
+    client: TelegramClient,
+    database: Database,
+    settings: SavedArchiverSettings,
+    *,
+    archive_one: Callable[[Message], Awaitable[None]],
+) -> None:
+    while True:
+        await asyncio.sleep(settings.recent_scan_interval_seconds)
+        try:
+            await scan_recent_saved_messages(
+                client,
+                database,
+                settings,
+                limit=settings.recent_scan_limit,
+                archive_one=archive_one,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Periodic Saved Messages recent scan failed")
+
+
+async def scan_existing_channel_messages(
+    client: TelegramClient,
+    database: Database,
+    settings: SavedArchiverSettings,
+    entity: object,
+    *,
+    archive_one: Callable[[Message], Awaitable[None]],
+) -> None:
+    info = channel_info_from_entity(entity)
+    LOGGER.warning("Scanning existing channel media: peer=%s title=%s", full_channel_peer_id(info.id), info.title)
+    scanned = 0
+    async for message in client.iter_messages(entity, reverse=True):
+        scanned += 1
+        await archive_one(message)
+        if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
+            LOGGER.warning("Channel scan progress: peer=%s scanned=%s", full_channel_peer_id(info.id), scanned)
+    LOGGER.warning("Existing channel scan finished: peer=%s scanned=%s", full_channel_peer_id(info.id), scanned)
+
+
+async def scan_recent_channel_messages(
+    client: TelegramClient,
+    settings: SavedArchiverSettings,
+    entity: object,
+    *,
+    limit: int,
+    archive_one: Callable[[Message], Awaitable[None]],
+) -> None:
+    if limit <= 0:
+        return
+
+    info = channel_info_from_entity(entity)
+    LOGGER.warning("Scanning recent channel media: peer=%s limit=%s", full_channel_peer_id(info.id), limit)
+    scanned = 0
+    async for message in client.iter_messages(entity, limit=limit):
+        scanned += 1
+        await archive_one(message)
+        if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
+            LOGGER.warning(
+                "Recent channel scan progress: peer=%s scanned=%s limit=%s",
+                full_channel_peer_id(info.id),
+                scanned,
+                limit,
+            )
+    LOGGER.warning("Recent channel scan finished: peer=%s scanned=%s limit=%s", full_channel_peer_id(info.id), scanned, limit)
+
+
+async def retry_partial_channel_messages(
+    client: TelegramClient,
+    settings: SavedArchiverSettings,
+    entities_by_id: dict[int, object],
+    *,
+    archive_one: Callable[[Message], Awaitable[None]],
+) -> None:
+    partials = channel_partial_message_refs(settings.download_dir / ".tmp", limit=settings.retry_partials_limit)
+    if not partials:
+        LOGGER.warning("No channel partial downloads found to retry")
+        return
+
+    LOGGER.warning("Retrying channel partial downloads: count=%s", len(partials))
+    scanned = 0
+    for channel_id, message_id in partials:
+        entity = entities_by_id.get(channel_id)
+        if entity is None:
+            LOGGER.warning("Channel partial skipped because peer is not configured: channel_id=%s message=%s", channel_id, message_id)
+            continue
+        message = await client.get_messages(entity, ids=message_id)
+        if message is None:
+            continue
+        scanned += 1
+        await archive_one(message)
+        if settings.scan_progress_every > 0 and scanned % settings.scan_progress_every == 0:
+            LOGGER.warning("Channel partial retry progress: scanned=%s total=%s", scanned, len(partials))
+    LOGGER.warning("Channel partial retry finished: scanned=%s total=%s", scanned, len(partials))
+
+
+def channel_partial_message_refs(temp_dir: Path, *, limit: int = 0) -> list[tuple[int, int]]:
+    if not temp_dir.exists():
+        return []
+
+    partials: list[tuple[float, int, int]] = []
+    for path in temp_dir.glob("channel_*.part"):
+        match = CHANNEL_PARTIAL_NAME_RE.match(path.name)
+        if match is None:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        partials.append((mtime, int(match.group(1)), int(match.group(2))))
+
+    seen: set[tuple[int, int]] = set()
+    refs: list[tuple[int, int]] = []
+    for _, channel_id, message_id in sorted(partials):
+        ref = (channel_id, message_id)
+        if ref in seen:
+            continue
+        seen.add(ref)
+        refs.append(ref)
+        if limit > 0 and len(refs) >= limit:
+            break
+    return refs
+
+
+async def periodic_channel_recent_scan_loop(
+    client: TelegramClient,
+    settings: SavedArchiverSettings,
+    entities: list[object],
+    *,
+    archive_one: Callable[[Message], Awaitable[None]],
+) -> None:
+    while True:
+        await asyncio.sleep(settings.recent_scan_interval_seconds)
+        for entity in entities:
+            try:
+                await scan_recent_channel_messages(
+                    client,
+                    settings,
+                    entity,
+                    limit=settings.recent_scan_limit,
+                    archive_one=archive_one,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("Periodic channel recent scan failed: peer=%s", full_channel_peer_id(getattr(entity, "id", None)))
+
+
 async def run_archiver() -> None:
     settings = load_saved_archiver_settings()
     logging.basicConfig(
@@ -136,24 +520,145 @@ async def run_archiver() -> None:
         proxy=settings.proxy,
     )
 
-    async with client:
-        me = await client.get_me()
-        LOGGER.warning("Saved Messages archiver started for account id=%s", getattr(me, "id", "unknown"))
+    try:
+        async with client:
+            me = await client.get_me()
+            LOGGER.warning("Saved Messages archiver started for account id=%s", getattr(me, "id", "unknown"))
 
-        if settings.archive_existing:
-            LOGGER.warning("Scanning existing Saved Messages media")
-            async for message in client.iter_messages("me", reverse=True):
-                await archive_message(client, database, settings, message)
-            LOGGER.warning("Existing Saved Messages scan finished")
+            archive_lock = asyncio.Lock()
 
-        @client.on(events.NewMessage(chats="me"))
-        async def handle_saved_message(event: events.NewMessage.Event) -> None:
-            await archive_message(client, database, settings, event.message)
+            async def archive_one(message: Message) -> None:
+                async with archive_lock:
+                    await archive_message(client, database, settings, message)
 
-        LOGGER.warning("Listening for new Saved Messages media")
-        await client.run_until_disconnected()
+            @client.on(events.NewMessage(chats="me"))
+            async def handle_saved_message(event: events.NewMessage.Event) -> None:
+                await archive_one(event.message)
 
-    database.close()
+            periodic_task: asyncio.Task[None] | None = None
+            if settings.recent_scan_interval_seconds > 0 and settings.recent_scan_limit > 0:
+                periodic_task = asyncio.create_task(
+                    periodic_recent_scan_loop(client, database, settings, archive_one=archive_one)
+                )
+                LOGGER.warning(
+                    "Periodic Saved Messages recent scan enabled: interval_seconds=%s limit=%s",
+                    settings.recent_scan_interval_seconds,
+                    settings.recent_scan_limit,
+                )
+
+            LOGGER.warning("Listening for new Saved Messages media")
+            if settings.retry_partials_on_start:
+                await retry_partial_saved_messages(client, database, settings, archive_one=archive_one)
+            if settings.archive_existing:
+                await scan_existing_saved_messages(client, database, settings, archive_one=archive_one)
+
+            try:
+                await client.run_until_disconnected()
+            finally:
+                if periodic_task is not None:
+                    periodic_task.cancel()
+                    try:
+                        await periodic_task
+                    except asyncio.CancelledError:
+                        pass
+    finally:
+        database.close()
+
+
+async def run_channel_archiver() -> None:
+    channel_settings = load_channel_archiver_settings()
+    settings = channel_settings.archive
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    database = Database(settings.db_path)
+    client = TelegramClient(
+        str(settings.session_path),
+        settings.api_id,
+        settings.api_hash,
+        proxy=settings.proxy,
+    )
+
+    try:
+        async with client:
+            me = await client.get_me()
+            LOGGER.warning("Channel archiver started for account id=%s", getattr(me, "id", "unknown"))
+            entities: list[object] = []
+            for peer in channel_settings.peers:
+                entity = await resolve_channel_entity(client, peer)
+                info = channel_info_from_entity(entity)
+                if info.protected_content:
+                    LOGGER.warning("Protected channel skipped: peer=%s title=%s", peer, info.title)
+                    continue
+                entities.append(entity)
+                LOGGER.warning("Configured channel: peer=%s title=%s", full_channel_peer_id(info.id), info.title)
+
+            if not entities:
+                raise RuntimeError("no usable channels configured")
+
+            archive_lock = asyncio.Lock()
+
+            async def archive_one(message: Message) -> None:
+                async with archive_lock:
+                    if has_protected_content(message):
+                        LOGGER.warning(
+                            "Protected channel message skipped: chat=%s message=%s",
+                            getattr(message, "chat_id", None),
+                            message.id,
+                        )
+                        return
+                    source_key = f"channel_{normalized_channel_id(getattr(message, 'chat_id', None))}"
+                    await archive_message(
+                        client,
+                        database,
+                        settings,
+                        message,
+                        source_key=source_key,
+                        log_label="Channel",
+                        apply_saved_blocks=False,
+                    )
+
+            @client.on(events.NewMessage(chats=entities))
+            async def handle_channel_message(event: events.NewMessage.Event) -> None:
+                await archive_one(event.message)
+
+            periodic_task: asyncio.Task[None] | None = None
+            if settings.recent_scan_interval_seconds > 0 and settings.recent_scan_limit > 0:
+                periodic_task = asyncio.create_task(
+                    periodic_channel_recent_scan_loop(client, settings, entities, archive_one=archive_one)
+                )
+                LOGGER.warning(
+                    "Periodic channel recent scan enabled: interval_seconds=%s limit=%s",
+                    settings.recent_scan_interval_seconds,
+                    settings.recent_scan_limit,
+                )
+
+            if settings.retry_partials_on_start:
+                entities_by_id = {
+                    normalized_channel_id(getattr(entity, "id", None)): entity
+                    for entity in entities
+                    if getattr(entity, "id", None) is not None
+                }
+                await retry_partial_channel_messages(client, settings, entities_by_id, archive_one=archive_one)
+            if settings.archive_existing:
+                for entity in entities:
+                    await scan_existing_channel_messages(client, database, settings, entity, archive_one=archive_one)
+
+            LOGGER.warning("Listening for new channel media")
+            try:
+                await client.run_until_disconnected()
+            finally:
+                if periodic_task is not None:
+                    periodic_task.cancel()
+                    try:
+                        await periodic_task
+                    except asyncio.CancelledError:
+                        pass
+    finally:
+        database.close()
+
 
 async def run_saved_stats(*, limit: int | None = None, progress_every: int = 1000) -> None:
     settings = load_saved_archiver_settings()
@@ -183,6 +688,286 @@ async def run_saved_stats(*, limit: int | None = None, progress_every: int = 100
     finally:
         database.close()
 
+async def run_channels_list(*, include_groups: bool = False, limit: int | None = None) -> None:
+    settings = load_telethon_session_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    client = TelegramClient(
+        str(settings.session_path),
+        settings.api_id,
+        settings.api_hash,
+        proxy=settings.proxy,
+    )
+
+    try:
+        async with client:
+            infos = await collect_joined_channel_infos(client, include_groups=include_groups, limit=limit)
+            print(format_channel_list(infos))
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower():
+            raise SystemExit(
+                "Telegram session is locked. Stop the saved-archiver service before running channels-list."
+            ) from exc
+        raise
+
+
+async def run_channel_check(
+    peer: str,
+    *,
+    limit: int = 20,
+    download_sample: bool = False,
+    max_sample_bytes: int = 50 * 1024 * 1024,
+) -> None:
+    settings = load_telethon_session_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    client = TelegramClient(
+        str(settings.session_path),
+        settings.api_id,
+        settings.api_hash,
+        proxy=settings.proxy,
+    )
+
+    try:
+        async with client:
+            result = await check_channel(
+                client,
+                peer,
+                limit=limit,
+                download_sample=download_sample,
+                max_sample_bytes=max_sample_bytes,
+            )
+            print(format_channel_check_result(result))
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower():
+            raise SystemExit(
+                "Telegram session is locked. Stop the saved-archiver service before running channel-check."
+            ) from exc
+        raise
+
+
+async def collect_joined_channel_infos(
+    client: TelegramClient,
+    *,
+    include_groups: bool = False,
+    limit: int | None = None,
+) -> list[ChannelInfo]:
+    infos: list[ChannelInfo] = []
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+        if not is_channel_entity(entity):
+            continue
+        broadcast = bool(getattr(entity, "broadcast", False))
+        if not include_groups and not broadcast:
+            continue
+        infos.append(channel_info_from_entity(entity))
+        if limit is not None and len(infos) >= limit:
+            break
+    return infos
+
+
+async def check_channel(
+    client: TelegramClient,
+    peer: str,
+    *,
+    limit: int = 20,
+    download_sample: bool = False,
+    max_sample_bytes: int = 50 * 1024 * 1024,
+) -> ChannelCheckResult:
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0")
+
+    entity = await resolve_channel_entity(client, peer)
+    info = channel_info_from_entity(entity)
+    scanned_messages = 0
+    media_messages = 0
+    protected_messages = 0
+    sample_message: Message | None = None
+    sample_ref: MediaRef | None = None
+
+    async for message in client.iter_messages(entity, limit=limit):
+        scanned_messages += 1
+        message_protected = has_protected_content(message)
+        if message_protected:
+            protected_messages += 1
+
+        ref = media_ref_from_message(message)
+        if ref is None:
+            continue
+
+        media_messages += 1
+        if sample_message is None and not message_protected:
+            sample_message = message
+            sample_ref = ref
+
+    sample_download_status = "not_requested"
+    sample_download_detail = "pass --download-sample to try one temporary media download"
+    if download_sample:
+        if info.protected_content or protected_messages:
+            sample_download_status = "skipped_protected"
+            sample_download_detail = "protected content flag found on channel or sampled messages"
+        elif sample_message is None or sample_ref is None:
+            sample_download_status = "skipped_no_media"
+            sample_download_detail = "no unprotected media message found in sampled messages"
+        else:
+            sample_download_status, sample_download_detail = await download_channel_sample(
+                client,
+                sample_message,
+                sample_ref,
+                max_sample_bytes=max_sample_bytes,
+            )
+
+    return ChannelCheckResult(
+        peer=peer,
+        id=info.id,
+        title=info.title,
+        username=info.username,
+        protected_content=info.protected_content,
+        scanned_messages=scanned_messages,
+        media_messages=media_messages,
+        protected_messages=protected_messages,
+        sample_download_status=sample_download_status,
+        sample_download_detail=sample_download_detail,
+    )
+
+
+async def download_channel_sample(
+    client: TelegramClient,
+    message: Message,
+    ref: MediaRef,
+    *,
+    max_sample_bytes: int,
+) -> tuple[str, str]:
+    if ref.file_size is not None and ref.file_size > max_sample_bytes:
+        return (
+            "skipped_too_large",
+            f"sample_media_bytes={ref.file_size} max_sample_bytes={max_sample_bytes}",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="telegram-archiver-check-") as temp_dir:
+        temp_path = resumable_temp_path(Path(temp_dir), message.id, ref)
+        try:
+            downloaded_path = await download_media_resumable(client, message, ref, temp_path)
+        except Exception as exc:
+            LOGGER.exception("Channel sample download failed: message=%s", message.id)
+            return ("failed", f"{type(exc).__name__}: {exc}")
+        return ("success", f"downloaded_bytes={downloaded_path.stat().st_size}")
+
+
+def channel_info_from_entity(entity: object) -> ChannelInfo:
+    return ChannelInfo(
+        id=getattr(entity, "id", None),
+        title=display_peer_title(entity),
+        username=getattr(entity, "username", None),
+        broadcast=bool(getattr(entity, "broadcast", False)),
+        megagroup=bool(getattr(entity, "megagroup", False)),
+        protected_content=has_protected_content(entity),
+    )
+
+
+async def resolve_channel_entity(client: TelegramClient, peer: str) -> object:
+    try:
+        return await client.get_entity(peer)
+    except Exception:
+        peer_id = parse_channel_peer_id(peer)
+        if peer_id is None:
+            raise
+
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+        if not is_channel_entity(entity):
+            continue
+        entity_id = getattr(entity, "id", None)
+        if entity_id == peer_id:
+            return entity
+    raise ValueError(f"channel not found in joined dialogs: {peer}")
+
+
+def parse_channel_peer_id(peer: str) -> int | None:
+    value = peer.strip()
+    if not re.fullmatch(r"-?\d+", value):
+        return None
+    raw_id = int(value)
+    if raw_id <= -1000000000000:
+        return int(str(raw_id)[4:])
+    return abs(raw_id)
+
+
+def normalized_channel_id(value: int | None) -> int:
+    if value is None:
+        return 0
+    if value <= -1000000000000:
+        return int(str(value)[4:])
+    return abs(value)
+
+
+def full_channel_peer_id(channel_id: int | None) -> str:
+    if channel_id is None:
+        return "-"
+    return f"-100{channel_id}"
+
+
+def is_channel_entity(entity: object) -> bool:
+    return entity.__class__.__name__ == "Channel"
+
+
+def has_protected_content(value: object) -> bool:
+    return bool(getattr(value, "noforwards", False) or getattr(value, "no_forwards", False))
+
+
+def display_peer_title(entity: object) -> str:
+    title = getattr(entity, "title", None)
+    if title:
+        return str(title)
+    first_name = getattr(entity, "first_name", None)
+    last_name = getattr(entity, "last_name", None)
+    name = " ".join(part for part in (first_name, last_name) if part)
+    return name or str(getattr(entity, "id", "unknown"))
+
+
+def format_channel_list(infos: list[ChannelInfo]) -> str:
+    lines = [
+        "Joined channels",
+        f"count={len(infos)}",
+    ]
+    for info in infos:
+        username = f"@{info.username}" if info.username else "-"
+        flags = []
+        if info.broadcast:
+            flags.append("broadcast")
+        if info.megagroup:
+            flags.append("megagroup")
+        if info.protected_content:
+            flags.append("protected")
+        flag_text = ",".join(flags) if flags else "-"
+        lines.append(f"id={info.id} peer={full_channel_peer_id(info.id)} username={username} flags={flag_text} title={info.title}")
+    return "\n".join(lines)
+
+
+def format_channel_check_result(result: ChannelCheckResult) -> str:
+    username = f"@{result.username}" if result.username else "-"
+    lines = [
+        "Channel check",
+        f"peer={result.peer}",
+        f"id={result.id}",
+        f"title={result.title}",
+        f"username={username}",
+        f"protected_content={result.protected_content}",
+        f"scanned_messages={result.scanned_messages}",
+        f"media_messages={result.media_messages}",
+        f"protected_messages={result.protected_messages}",
+        f"sample_download_status={result.sample_download_status}",
+        f"sample_download_detail={result.sample_download_detail}",
+    ]
+    return "\n".join(lines)
+
+
 async def collect_saved_stats(
     client: TelegramClient,
     database: Database,
@@ -209,7 +994,7 @@ async def collect_saved_stats(
         if ref is None:
             continue
 
-        if is_blocked_forward_source(settings, message):
+        if is_blocked_saved_message(settings, message, ref):
             stats = add_saved_stats(stats, media_messages=1, blocked_media=1)
             continue
 
@@ -262,19 +1047,23 @@ async def archive_message(
     database: Database,
     settings: SavedArchiverSettings,
     message: Message,
+    *,
+    source_key: str = "saved",
+    log_label: str = "Saved Messages",
+    apply_saved_blocks: bool = True,
 ) -> None:
-    if is_blocked_forward_source(settings, message):
-        LOGGER.warning("Blocked Saved Messages forward skipped: message=%s", message.id)
+    ref = media_ref_from_message(message, source_key=source_key)
+    if apply_saved_blocks and is_blocked_saved_message(settings, message, ref):
+        LOGGER.warning("Blocked %s item skipped: message=%s", log_label, message.id)
         return
 
-    text_path = archive_message_text(database, settings, message)
-    ref = media_ref_from_message(message)
+    text_path = archive_message_text(database, settings, message, source_key=source_key, log_label=log_label)
     if ref is None:
         return
 
     existing = database.get_saved_by_unique_id(ref.file_unique_id)
     if existing is not None:
-        LOGGER.info("Message %s already archived at %s", message.id, existing.final_path)
+        LOGGER.info("%s message %s already archived at %s", log_label, message.id, existing.final_path)
         return
 
     existing_by_file_id = database.get_saved_by_file_id(ref.file_id)
@@ -289,7 +1078,8 @@ async def archive_message(
         )
         record_message_metadata(database, message, ref, existing_by_file_id.sha256, existing_by_file_id.final_path)
         LOGGER.warning(
-            "Duplicate Saved Messages media skipped before download: message=%s path=%s",
+            "Duplicate %s media skipped before download: message=%s path=%s",
+            log_label,
             message.id,
             existing_by_file_id.final_path,
         )
@@ -297,7 +1087,7 @@ async def archive_message(
 
     temp_dir = settings.download_dir / ".tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = resumable_temp_path(temp_dir, message.id, ref)
+    temp_path = resumable_temp_path(temp_dir, message.id, ref, source_key=source_key)
 
     try:
         actual_temp_path = await download_media_resumable(client, message, ref, temp_path)
@@ -317,7 +1107,7 @@ async def archive_message(
                 file_sha256=existing_by_hash.sha256,
             )
             record_message_metadata(database, message, ref, existing_by_hash.sha256, existing_by_hash.final_path)
-            LOGGER.warning("Duplicate Saved Messages media skipped: message=%s path=%s", message.id, existing_by_hash.final_path)
+            LOGGER.warning("Duplicate %s media skipped: message=%s path=%s", log_label, message.id, existing_by_hash.final_path)
             return
 
         final_name = build_storage_name(ref, sha256)
@@ -326,40 +1116,66 @@ async def archive_message(
         final_path = unique_target_path(target_dir / final_name)
         actual_temp_path.replace(final_path)
 
-        database.record_saved_file(
-            sha256=sha256,
-            final_path=str(final_path),
-            original_name=ref.file_name,
-            media_type=ref.media_type,
-            mime_type=ref.mime_type,
-            file_size=ref.file_size or final_path.stat().st_size,
-            source_chat_id=getattr(message, "chat_id", None),
-            source_message_id=message.id,
-            forwarded_from=describe_forward_source(message),
-            telegram_file_unique_id=ref.file_unique_id,
-            telegram_file_id=ref.file_id,
-        )
-        record_message_metadata(database, message, ref, sha256, str(final_path))
-        LOGGER.warning("Archived Saved Messages media: message=%s path=%s", message.id, final_path)
+        try:
+            database.record_saved_file(
+                sha256=sha256,
+                final_path=str(final_path),
+                original_name=ref.file_name,
+                media_type=ref.media_type,
+                mime_type=ref.mime_type,
+                file_size=ref.file_size or final_path.stat().st_size,
+                source_chat_id=getattr(message, "chat_id", None),
+                source_message_id=message.id,
+                forwarded_from=describe_forward_source(message),
+                telegram_file_unique_id=ref.file_unique_id,
+                telegram_file_id=ref.file_id,
+            )
+            record_message_metadata(database, message, ref, sha256, str(final_path))
+        except Exception:
+            final_path.replace(actual_temp_path)
+            raise
+        LOGGER.warning("Archived %s media: message=%s path=%s", log_label, message.id, final_path)
     except Exception:
-        # Keep the .part file so the next saved-source run can resume it.
-        LOGGER.exception("Failed to archive Saved Messages media: message=%s", message.id)
+        # Keep the .part file so the next source run can resume it.
+        LOGGER.exception("Failed to archive %s media: message=%s", log_label, message.id)
+
+def is_blocked_saved_message(
+    settings: SavedArchiverSettings,
+    message: Message,
+    ref: MediaRef | None = None,
+) -> bool:
+    forward = getattr(message, "forward", None)
+    if forward is not None and getattr(forward, "chat_id", None) in settings.blocked_forward_chat_ids:
+        return True
+    if not settings.blocked_forward_keywords:
+        return False
+    haystack = blocked_keyword_haystack(message, ref)
+    return any(keyword in haystack for keyword in settings.blocked_forward_keywords)
 
 def is_blocked_forward_source(settings: SavedArchiverSettings, message: Message) -> bool:
-    forward = getattr(message, "forward", None)
-    if forward is None:
-        return False
-    chat_id = getattr(forward, "chat_id", None)
-    return chat_id in settings.blocked_forward_chat_ids
+    return is_blocked_saved_message(settings, message)
 
-def resumable_temp_path(temp_dir: Path, message_id: int, ref: MediaRef) -> Path:
+def blocked_keyword_haystack(message: Message, ref: MediaRef | None = None) -> str:
+    forward = getattr(message, "forward", None)
+    forward_chat = getattr(forward, "chat", None) if forward else None
+    forward_sender = getattr(forward, "sender", None) if forward else None
+    parts = [
+        getattr(forward_chat, "title", None),
+        getattr(forward_chat, "username", None),
+        getattr(forward_sender, "username", None),
+        getattr(forward_sender, "first_name", None),
+        getattr(forward_sender, "last_name", None),
+    ]
+    return " ".join(str(part).casefold() for part in parts if part is not None)
+
+def resumable_temp_path(temp_dir: Path, message_id: int, ref: MediaRef, *, source_key: str = "saved") -> Path:
     digest = hashlib.sha256(ref.file_id.encode("utf-8")).hexdigest()[:16]
     temp_base = sanitize_filename(ref.file_name or ref.media_type)
     if Path(temp_base).suffix.lower() == ref.extension.lower():
         display_name = temp_base
     else:
         display_name = f"{temp_base}{ref.extension}"
-    return temp_dir / f"saved_{message_id}_{digest}_{display_name}.part"
+    return temp_dir / f"{sanitize_filename(source_key)}_{message_id}_{digest}_{display_name}.part"
 
 async def download_media_resumable(
     client: TelegramClient,
@@ -372,7 +1188,7 @@ async def download_media_resumable(
 
     if expected_size is not None and existing_size > expected_size:
         LOGGER.warning(
-            "Saved Messages partial file is larger than expected; restarting: message=%s path=%s",
+            "Partial file is larger than expected; restarting: message=%s path=%s",
             message.id,
             temp_path,
         )
@@ -419,13 +1235,13 @@ async def append_download(
     mode = "ab" if offset else "wb"
     if offset:
         LOGGER.warning(
-            "Resuming Saved Messages media download: message=%s offset=%s path=%s",
+            "Resuming media download: message=%s offset=%s path=%s",
             message.id,
             offset,
             temp_path,
         )
     else:
-        LOGGER.warning("Starting Saved Messages media download: message=%s path=%s", message.id, temp_path)
+        LOGGER.warning("Starting media download: message=%s path=%s", message.id, temp_path)
 
     downloaded_any = False
     with temp_path.open(mode) as handle:
@@ -457,7 +1273,7 @@ async def retry_incomplete_download(
     for attempt in range(1, attempts + 1):
         if force_restart or final_size >= expected_size:
             LOGGER.warning(
-                "Saved Messages partial file made no progress; restarting from zero: message=%s path=%s",
+                "Partial file made no progress; restarting from zero: message=%s path=%s",
                 message.id,
                 temp_path,
             )
@@ -468,7 +1284,7 @@ async def retry_incomplete_download(
             offset = final_size
 
         LOGGER.warning(
-            "Retrying incomplete Saved Messages media download: message=%s attempt=%s offset=%s expected=%s got=%s",
+            "Retrying incomplete media download: message=%s attempt=%s offset=%s expected=%s got=%s",
             message.id,
             attempt,
             offset,
@@ -504,7 +1320,14 @@ async def download_media_fallback(
     final_size = temp_path.stat().st_size if temp_path.exists() else 0
     return final_size, final_size > 0
 
-def archive_message_text(database: Database, settings: SavedArchiverSettings, message: Message) -> Path | None:
+def archive_message_text(
+    database: Database,
+    settings: SavedArchiverSettings,
+    message: Message,
+    *,
+    source_key: str = "saved",
+    log_label: str = "Saved Messages",
+) -> Path | None:
     text = getattr(message, "raw_text", None) or ""
     if not text.strip():
         return None
@@ -517,7 +1340,7 @@ def archive_message_text(database: Database, settings: SavedArchiverSettings, me
             encoding="utf-8",
             newline="\n",
             dir=settings.text_dir,
-            prefix=f"message_{message.id}_",
+            prefix=f"{sanitize_filename(source_key)}_{message.id}_",
             suffix=".tmp",
             delete=False,
         ) as handle:
@@ -528,32 +1351,36 @@ def archive_message_text(database: Database, settings: SavedArchiverSettings, me
         existing = database.get_saved_by_sha256(sha256)
         if existing is not None:
             temp_path.unlink(missing_ok=True)
-            LOGGER.info("Duplicate Saved Messages text skipped: message=%s path=%s", message.id, existing.final_path)
+            LOGGER.info("Duplicate %s text skipped: message=%s path=%s", log_label, message.id, existing.final_path)
             return Path(existing.final_path)
 
-        final_name = f"message_{message.id}__{sha256[:12]}.txt"
+        final_name = f"{sanitize_filename(source_key)}_{message.id}__{sha256[:12]}.txt"
         final_path = unique_target_path(settings.text_dir / final_name)
         temp_path.replace(final_path)
 
-        database.record_saved_file(
-            sha256=sha256,
-            final_path=str(final_path),
-            original_name=f"message_{message.id}.txt",
-            media_type="text",
-            mime_type="text/plain",
-            file_size=final_path.stat().st_size,
-            source_chat_id=getattr(message, "chat_id", None),
-            source_message_id=message.id,
-            forwarded_from=describe_forward_source(message),
-            telegram_file_unique_id=f"saved-text:{message.id}",
-            telegram_file_id=f"saved-text:{message.id}",
-        )
-        LOGGER.warning("Archived Saved Messages text: message=%s path=%s", message.id, final_path)
+        try:
+            database.record_saved_file(
+                sha256=sha256,
+                final_path=str(final_path),
+                original_name=f"message_{message.id}.txt",
+                media_type="text",
+                mime_type="text/plain",
+                file_size=final_path.stat().st_size,
+                source_chat_id=getattr(message, "chat_id", None),
+                source_message_id=message.id,
+                forwarded_from=describe_forward_source(message),
+                telegram_file_unique_id=f"{source_key}-text:{message.id}",
+                telegram_file_id=f"{source_key}-text:{message.id}",
+            )
+        except Exception:
+            final_path.replace(temp_path)
+            raise
+        LOGGER.warning("Archived %s text: message=%s path=%s", log_label, message.id, final_path)
         return final_path
     except Exception:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-        LOGGER.exception("Failed to archive Saved Messages text: message=%s", message.id)
+        LOGGER.exception("Failed to archive %s text: message=%s", log_label, message.id)
         return None
 
 def build_text_archive_body(message: Message, text: str) -> str:
@@ -577,17 +1404,22 @@ def build_text_archive_body(message: Message, text: str) -> str:
     ]
     return "\n".join(lines)
 
-def media_ref_from_message(message: Message) -> MediaRef | None:
+def media_ref_from_message(message: Message, *, source_key: str = "saved") -> MediaRef | None:
     if not getattr(message, "media", None):
         return None
 
     file_info = getattr(message, "file", None)
-    file_id = str(getattr(getattr(message, "document", None), "id", None) or getattr(getattr(message, "photo", None), "id", None) or message.id)
+    document = getattr(message, "document", None)
+    photo = getattr(message, "photo", None)
+    if file_info is None and document is None and photo is None:
+        return None
+
+    file_id = str(getattr(document, "id", None) or getattr(photo, "id", None) or message.id)
     mime_type = getattr(file_info, "mime_type", None)
     file_name = getattr(file_info, "name", None)
     file_size = getattr(file_info, "size", None)
 
-    if getattr(message, "photo", None):
+    if photo:
         media_type = "photo"
         mime_type = mime_type or "image/jpeg"
         extension = ".jpg"
@@ -606,14 +1438,16 @@ def media_ref_from_message(message: Message) -> MediaRef | None:
     elif getattr(message, "sticker", None):
         media_type = "sticker"
         extension = pick_extension(file_name, mime_type, ".webp")
-    else:
+    elif document is not None or file_info is not None:
         media_type = "document"
         extension = pick_extension(file_name, mime_type, ".bin")
+    else:
+        return None
 
     return MediaRef(
         media_type=media_type,
         file_id=file_id,
-        file_unique_id=f"saved:{message.id}:{file_id}",
+        file_unique_id=f"{source_key}:{message.id}:{file_id}",
         file_name=file_name,
         file_size=file_size,
         mime_type=mime_type,

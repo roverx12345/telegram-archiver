@@ -1,9 +1,34 @@
+import os
 from pathlib import Path
 
 import pytest
 
+from tele_bot.db import Database
 from tele_bot.media import MediaRef
-from tele_bot.saved_archiver import SavedStats, download_media_resumable, format_saved_stats, resumable_temp_path
+from tele_bot.saved_archiver import (
+    ChannelCheckResult,
+    ChannelInfo,
+    SavedArchiverSettings,
+    SavedStats,
+    archive_message,
+    channel_partial_message_refs,
+    download_media_resumable,
+    format_channel_check_result,
+    format_channel_list,
+    format_saved_stats,
+    has_protected_content,
+    is_blocked_saved_message,
+    media_ref_from_message,
+    normalized_channel_id,
+    parse_channel_peer_id,
+    parse_keyword_set,
+    parse_peer_list,
+    retry_partial_saved_messages,
+    saved_partial_message_ids,
+    resumable_temp_path,
+    scan_existing_saved_messages,
+    scan_recent_saved_messages,
+)
 
 
 def test_resumable_temp_path_is_stable_and_part_suffixed(tmp_path: Path) -> None:
@@ -25,6 +50,23 @@ def test_resumable_temp_path_is_stable_and_part_suffixed(tmp_path: Path) -> None
     assert first.name.endswith("_my_clip.mp4.part")
 
 
+def test_resumable_temp_path_can_be_scoped_to_channel(tmp_path: Path) -> None:
+    ref = MediaRef(
+        media_type="video",
+        file_id="telegram-file-id",
+        file_unique_id="unique",
+        file_name="my clip.mp4",
+        file_size=123,
+        mime_type="video/mp4",
+        extension=".mp4",
+    )
+
+    result = resumable_temp_path(tmp_path, 42, ref, source_key="channel_2683725559")
+
+    assert result.name.startswith("channel_2683725559_42_")
+    assert result.name.endswith("_my_clip.mp4.part")
+
+
 def test_format_saved_stats() -> None:
     text = format_saved_stats(
         SavedStats(
@@ -42,6 +84,70 @@ def test_format_saved_stats() -> None:
     assert "blocked_media=1" in text
     assert "already_archived=3" in text
     assert "download_candidates=3" in text
+
+
+def test_format_channel_list() -> None:
+    text = format_channel_list(
+        [
+            ChannelInfo(
+                id=123,
+                title="Example Channel",
+                username="example",
+                broadcast=True,
+                megagroup=False,
+                protected_content=True,
+            )
+        ]
+    )
+
+    assert "count=1" in text
+    assert "peer=-100123" in text
+    assert "username=@example" in text
+    assert "flags=broadcast,protected" in text
+    assert "title=Example Channel" in text
+
+
+def test_parse_channel_peer_id_accepts_listed_and_full_ids() -> None:
+    assert parse_channel_peer_id("2683725559") == 2683725559
+    assert parse_channel_peer_id("-1002683725559") == 2683725559
+    assert parse_channel_peer_id("@example") is None
+
+
+def test_normalized_channel_id_accepts_full_and_internal_ids() -> None:
+    assert normalized_channel_id(2683725559) == 2683725559
+    assert normalized_channel_id(-1002683725559) == 2683725559
+    assert normalized_channel_id(None) == 0
+
+
+def test_parse_peer_list_trims_empty_items() -> None:
+    assert parse_peer_list(" @one, , -1002683725559 ") == ("@one", "-1002683725559")
+
+
+def test_format_channel_check_result() -> None:
+    text = format_channel_check_result(
+        ChannelCheckResult(
+            peer="@example",
+            id=123,
+            title="Example Channel",
+            username="example",
+            protected_content=True,
+            scanned_messages=20,
+            media_messages=4,
+            protected_messages=2,
+            sample_download_status="skipped_protected",
+            sample_download_detail="protected content flag found",
+        )
+    )
+
+    assert "peer=@example" in text
+    assert "protected_content=True" in text
+    assert "media_messages=4" in text
+    assert "sample_download_status=skipped_protected" in text
+
+
+def test_has_protected_content_accepts_telethon_flag_names() -> None:
+    assert has_protected_content(type("Entity", (), {"noforwards": True})()) is True
+    assert has_protected_content(type("Entity", (), {"no_forwards": True})()) is True
 
 
 class NoProgressThenCompleteClient:
@@ -150,3 +256,255 @@ async def test_resumable_download_falls_back_to_full_download(tmp_path: Path) ->
     assert result == temp_path
     assert temp_path.read_bytes() == b"complete"
     assert client.fallback_called is True
+
+
+
+def saved_settings(tmp_path: Path, *, scan_progress_every: int = 1000) -> SavedArchiverSettings:
+    return SavedArchiverSettings(
+        api_id=1,
+        api_hash="hash",
+        session_path=tmp_path / "session",
+        download_dir=tmp_path / "downloads",
+        text_dir=tmp_path / "texts",
+        db_path=tmp_path / "bot.db",
+        log_level="INFO",
+        archive_existing=True,
+        scan_progress_every=scan_progress_every,
+        recent_scan_interval_seconds=900,
+        recent_scan_limit=2000,
+        retry_partials_on_start=True,
+        retry_partials_limit=0,
+        blocked_forward_chat_ids=frozenset(),
+        blocked_forward_keywords=frozenset(),
+        proxy=None,
+    )
+
+
+class IterMessagesClient:
+    def __init__(self, messages: list[object]) -> None:
+        self.messages = messages
+        self.calls: list[dict[str, object]] = []
+
+    async def iter_messages(self, chat: str, **kwargs):
+        assert chat == "me"
+        self.calls.append(kwargs)
+        for message in self.messages:
+            yield message
+
+
+@pytest.mark.anyio
+async def test_scan_existing_saved_messages_logs_progress(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    messages = [type("Message", (), {"id": item, "text": "", "raw_text": ""})() for item in range(3)]
+    database = Database(tmp_path / "bot.db")
+    settings = saved_settings(tmp_path, scan_progress_every=2)
+
+    await scan_existing_saved_messages(IterMessagesClient(messages), database, settings)
+
+    assert "Saved Messages scan progress: scanned=2" in caplog.text
+    assert "Existing Saved Messages scan finished: scanned=3" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_scan_recent_saved_messages_uses_limit(tmp_path: Path) -> None:
+    messages = [type("Message", (), {"id": item, "text": "", "raw_text": ""})() for item in range(3)]
+    database = Database(tmp_path / "bot.db")
+    settings = saved_settings(tmp_path)
+    client = IterMessagesClient(messages)
+
+    await scan_recent_saved_messages(client, database, settings, limit=2)
+
+    assert client.calls == [{"limit": 2}]
+
+
+def test_media_ref_from_message_skips_webpage_preview() -> None:
+    message = type(
+        "Message",
+        (),
+        {
+            "id": 402131,
+            "media": type("MessageMediaWebPage", (), {})(),
+            "file": None,
+            "document": None,
+            "photo": None,
+        },
+    )()
+
+    assert media_ref_from_message(message) is None
+
+
+def test_media_ref_from_message_uses_source_key_for_unique_id() -> None:
+    message = type(
+        "Message",
+        (),
+        {
+            "id": 42,
+            "media": object(),
+            "file": type("File", (), {"name": "media.bin", "size": 10, "mime_type": "application/octet-stream"})(),
+            "document": type("Document", (), {"id": "file-id"})(),
+            "photo": None,
+        },
+    )()
+
+    saved_ref = media_ref_from_message(message)
+    channel_ref = media_ref_from_message(message, source_key="channel_2683725559")
+
+    assert saved_ref is not None
+    assert channel_ref is not None
+    assert saved_ref.file_unique_id == "saved:42:file-id"
+    assert channel_ref.file_unique_id == "channel_2683725559:42:file-id"
+
+
+def test_saved_partial_message_ids_extracts_unique_message_ids_by_mtime(tmp_path: Path) -> None:
+    first = tmp_path / "saved_20_a_video.mp4.part"
+    duplicate = tmp_path / "saved_20_b_video.mp4.part"
+    second = tmp_path / "saved_30_c_video.mp4.part"
+    ignored = tmp_path / "other.part"
+    for path in [first, duplicate, second, ignored]:
+        path.write_bytes(b"")
+    first.touch()
+    duplicate.touch()
+    second.touch()
+
+    assert saved_partial_message_ids(tmp_path) == [20, 30]
+    assert saved_partial_message_ids(tmp_path, limit=1) == [20]
+
+
+def test_channel_partial_message_refs_extracts_channel_and_message_ids(tmp_path: Path) -> None:
+    first = tmp_path / "channel_2683725559_20_a_video.mp4.part"
+    duplicate = tmp_path / "channel_2683725559_20_b_video.mp4.part"
+    second = tmp_path / "channel_2683725559_30_c_video.mp4.part"
+    other_channel = tmp_path / "channel_123_20_c_video.mp4.part"
+    ignored = tmp_path / "saved_20_c_video.mp4.part"
+    for index, path in enumerate([first, duplicate, second, other_channel, ignored], start=1):
+        path.write_bytes(b"")
+        os.utime(path, (index, index))
+
+    assert channel_partial_message_refs(tmp_path) == [(2683725559, 20), (2683725559, 30), (123, 20)]
+    assert channel_partial_message_refs(tmp_path, limit=1) == [(2683725559, 20)]
+
+
+class PartialRetryClient:
+    def __init__(self, messages: list[object]) -> None:
+        self.messages = messages
+        self.requested_ids: list[list[int]] = []
+
+    async def get_messages(self, chat: str, *, ids: list[int]):
+        assert chat == "me"
+        self.requested_ids.append(ids)
+        by_id = {message.id: message for message in self.messages}
+        return [by_id.get(message_id) for message_id in ids]
+
+
+@pytest.mark.anyio
+async def test_retry_partial_saved_messages_reprocesses_partial_message_ids(tmp_path: Path) -> None:
+    settings = saved_settings(tmp_path)
+    temp_dir = settings.download_dir / ".tmp"
+    temp_dir.mkdir(parents=True)
+    (temp_dir / "saved_42_a_video.mp4.part").write_bytes(b"partial")
+    message = type("Message", (), {"id": 42, "text": "", "raw_text": ""})()
+    client = PartialRetryClient([message])
+    seen: list[int] = []
+
+    async def archive_one(item: object) -> None:
+        seen.append(item.id)
+
+    await retry_partial_saved_messages(client, Database(tmp_path / "bot.db"), settings, archive_one=archive_one)
+
+    assert client.requested_ids == [[42]]
+    assert seen == [42]
+
+
+class DownloadCompleteClient:
+    async def iter_download(self, message: object, *, offset: int, file_size: int | None):
+        yield b"complete"
+
+
+class FailingRecordDatabase(Database):
+    def record_saved_file(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        raise RuntimeError("database failed")
+
+
+@pytest.mark.anyio
+async def test_archive_message_moves_final_file_back_to_part_when_database_fails(tmp_path: Path) -> None:
+    database = FailingRecordDatabase(tmp_path / "bot.db")
+    settings = saved_settings(tmp_path)
+    message = type("Message", (), {"id": 123, "chat_id": 1, "text": "", "raw_text": ""})()
+    ref = MediaRef(
+        media_type="document",
+        file_id="file",
+        file_unique_id="saved:123:file",
+        file_name="media.bin",
+        file_size=len(b"complete"),
+        mime_type="application/octet-stream",
+        extension=".bin",
+    )
+    message.media = object()
+    message.file = type(
+        "File",
+        (),
+        {"name": "media.bin", "size": len(b"complete"), "mime_type": "application/octet-stream"},
+    )()
+    message.document = type(
+        "Document",
+        (),
+        {
+            "id": "file",
+            "file_reference": b"ref",
+            "size": len(b"complete"),
+            "mime_type": "application/octet-stream",
+            "attributes": [],
+        },
+    )()
+
+    await archive_message(DownloadCompleteClient(), database, settings, message)
+
+    temp_path = resumable_temp_path(settings.download_dir / ".tmp", message.id, ref)
+    assert temp_path.read_bytes() == b"complete"
+    assert list((settings.download_dir / "documents").glob("*.bin")) == []
+
+
+
+def test_parse_keyword_set_normalizes_items() -> None:
+    assert parse_keyword_set(" ZYjia, other ") == frozenset({"zyjia", "other"})
+
+
+def test_blocked_saved_message_matches_forward_chat_id(tmp_path: Path) -> None:
+    settings = saved_settings(tmp_path)
+    settings = SavedArchiverSettings(
+        **{**settings.__dict__, "blocked_forward_chat_ids": frozenset({-1001188449201})}
+    )
+    message = type("Message", (), {"id": 1, "forward": type("Forward", (), {"chat_id": -1001188449201})()})()
+
+    assert is_blocked_saved_message(settings, message) is True
+
+
+def test_blocked_saved_message_does_not_match_keyword_in_filename(tmp_path: Path) -> None:
+    settings = saved_settings(tmp_path)
+    settings = SavedArchiverSettings(
+        **{**settings.__dict__, "blocked_forward_keywords": frozenset({"zyjia"})}
+    )
+    message = type("Message", (), {"id": 1, "forward": None, "raw_text": ""})()
+    ref = MediaRef(
+        media_type="video",
+        file_id="file",
+        file_unique_id="unique",
+        file_name="电报群搜@ZYjia1.mp4",
+        file_size=1,
+        mime_type="video/mp4",
+        extension=".mp4",
+    )
+
+    assert is_blocked_saved_message(settings, message, ref) is False
+
+
+
+def test_blocked_saved_message_matches_keyword_in_forward_chat_username(tmp_path: Path) -> None:
+    settings = saved_settings(tmp_path)
+    settings = SavedArchiverSettings(
+        **{**settings.__dict__, "blocked_forward_keywords": frozenset({"zyjia"})}
+    )
+    chat = type("Chat", (), {"title": "Some channel", "username": "ZYjia_archive"})()
+    forward = type("Forward", (), {"chat_id": -1001, "chat": chat, "sender_id": None, "sender": None})()
+    message = type("Message", (), {"id": 1, "forward": forward, "raw_text": ""})()
+
+    assert is_blocked_saved_message(settings, message) is True

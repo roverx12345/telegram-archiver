@@ -2,10 +2,11 @@
 
 Archive Telegram media to local storage or NAS with dedupe, retry, and restart recovery.
 
-This is one archiver application with two source adapters:
+This is one archiver application with multiple source adapters:
 
 - `bot`: receives forwarded media in a private chat with a Telegram bot.
 - `saved`: scans and listens to your own Saved Messages with Telethon.
+- `channels`: scans and listens to configured joined channels with Telethon.
 
 [Read the Chinese documentation](./README.zh-CN.md)
 
@@ -13,7 +14,8 @@ This is one archiver application with two source adapters:
 
 - Downloads forwarded media sent to the bot in private chat.
 - Archives existing and new Saved Messages media.
-- Resumes interrupted Saved Messages media downloads from `.part` files.
+- Archives existing and new media from configured channels.
+- Resumes interrupted Saved Messages and channel media downloads from `.part` files.
 - Deduplicates by Telegram file identity first, then by downloaded file `sha256`.
 - Stores shared metadata in one SQLite database.
 - Persists bot download jobs and retries them after failures or restarts.
@@ -50,6 +52,21 @@ TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 TELEGRAM_SESSION=./data/saved_messages.session
 SAVED_ARCHIVE_EXISTING=true
+SAVED_RETRY_PARTIALS_ON_START=true
+SAVED_RETRY_PARTIALS_LIMIT=0
+SAVED_RECENT_SCAN_INTERVAL_SECONDS=900
+SAVED_RECENT_SCAN_LIMIT=2000
+```
+
+For the channel source, also set:
+
+```env
+CHANNEL_ARCHIVE_PEERS=-1002683725559,@public_channel
+CHANNEL_TELEGRAM_SESSION=./data/channel_archiver.session
+CHANNEL_ARCHIVE_EXISTING=true
+CHANNEL_RETRY_PARTIALS_ON_START=true
+CHANNEL_RECENT_SCAN_INTERVAL_SECONDS=900
+CHANNEL_RECENT_SCAN_LIMIT=2000
 ```
 
 ## Run Modes
@@ -57,7 +74,10 @@ SAVED_ARCHIVE_EXISTING=true
 ```bash
 telegram-archiver bot
 telegram-archiver saved
+telegram-archiver channels
 telegram-archiver saved-stats
+telegram-archiver channels-list
+telegram-archiver channel-check -1002683725559 --limit 20 --download-sample
 telegram-archiver clean-tmp
 telegram-archiver all
 ```
@@ -69,6 +89,8 @@ DOWNLOAD_DIR/.tmp/*.part
 ```
 
 The bot source still retries failed downloads from the beginning.
+
+On startup, the Saved Messages source can revisit message IDs parsed from existing `.tmp/saved_<message_id>_*.part` files and resume those partial downloads. The channel source does the same for `.tmp/channel_<channel_id>_<message_id>_*.part` files. Both Telethon sources can periodically rescan recent messages so missed realtime updates are picked up later.
 
 Stale partial files can be reviewed and cleaned with:
 

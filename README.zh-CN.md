@@ -2,24 +2,26 @@
 
 这个项目是一个 Telegram 媒体归档器，用来把 Telegram 媒体自动下载、去重并保存到本地或 NAS。
 
-它现在按“一个软件，两套 source”组织：
+它现在按“一个软件，多套 source”组织：
 
 - `bot`：Telegram Bot API source，处理私聊里转发给 bot 的媒体。
 - `saved`：Telethon Saved Messages source，扫描并监听你自己的 Saved Messages。
+- `channels`：Telethon Channel source，按配置扫描并监听你已加入且可访问的频道。
 
-两套 source 共用同一个数据库、下载目录、文件命名和去重逻辑；现有 `.env`、数据库和下载目录会继续沿用，不需要重新配置。
+多套 source 共用同一个数据库、下载目录、文件命名和去重逻辑；现有 `.env`、数据库和下载目录会继续沿用，不需要重新配置。
 
 ## 已实现需求
 
 1. 转发到 bot 的媒体会自动下载并保存。
 2. Saved Messages 里的历史和新增媒体可以自动归档。
-3. Saved Messages 媒体下载中断后，会从 `.part` 半成品继续下载。
-4. 不按文件名去重，优先使用 Telegram 的文件标识，再用下载后的 `sha256` 做二次确认。
-5. 支持 `/pair <code>` 配对授权，避免任意知道 bot 用户名的人都能直接使用。
-6. 支持接入本地 Telegram Bot API server 来加速 bot source 下载。
-7. bot 重启后会继续处理 Telegram 仍保留的积压消息，不会在启动时主动清空。
-8. bot 下载任务会落库保存，失败后可自动重试，异常重启后会继续恢复未完成任务。
-9. bot 启动时会自动注册 Telegram 命令菜单、简介和 `/help` 文档入口。
+3. 指定频道里的历史和新增媒体可以自动归档。
+4. Saved Messages 和频道媒体下载中断后，会从 `.part` 半成品继续下载。
+5. 不按文件名去重，优先使用 Telegram 的文件标识，再用下载后的 `sha256` 做二次确认。
+6. 支持 `/pair <code>` 配对授权，避免任意知道 bot 用户名的人都能直接使用。
+7. 支持接入本地 Telegram Bot API server 来加速 bot source 下载。
+8. bot 重启后会继续处理 Telegram 仍保留的积压消息，不会在启动时主动清空。
+9. bot 下载任务会落库保存，失败后可自动重试，异常重启后会继续恢复未完成任务。
+10. bot 启动时会自动注册 Telegram 命令菜单、简介和 `/help` 文档入口。
 
 ## 方案说明
 
@@ -40,6 +42,7 @@
 ### Saved Messages 断点续传
 
 - `telegram-archiver saved` 下载媒体时会写入 `DOWNLOAD_DIR/.tmp/*.part`。
+- 启动时可以根据 `.tmp/saved_<message_id>_*.part` 里的 message id 重新处理对应 Saved Messages，从而继续断点续传；也可以周期性补扫最近消息，弥补实时监听漏掉的更新。
 - 如果下载中断，`.part` 文件会保留。
 - 下次处理同一条 Saved Messages 媒体时，会从 `.part` 当前大小继续下载。
 - 下载完整后才会计算 `sha256`、去重、移动到最终分类目录。
@@ -47,12 +50,13 @@
 - 删除旧 `.part` 前建议先停掉正在下载的服务。
 - `telegram-archiver bot` 仍然是失败后整文件重试，不做断点续传。
 
-### 两套 source 的关系
+### 多套 source 的关系
 
 - `telegram-archiver bot` 使用 Bot API，只处理私聊中转发给 bot 的媒体。
 - `telegram-archiver saved` 使用 Telethon 用户会话，处理 Saved Messages。
-- `telegram-archiver all` 会用一个 supervisor 同时启动两套 source。
-- 两套 source 都写入 `DB_PATH` 指向的同一个 SQLite 数据库，并保存到 `DOWNLOAD_DIR`。
+- `telegram-archiver channels` 使用 Telethon 用户会话，处理 `CHANNEL_ARCHIVE_PEERS` 配置的频道。
+- `telegram-archiver all` 会用一个 supervisor 同时启动 bot 和 saved source。
+- 所有 source 都写入 `DB_PATH` 指向的同一个 SQLite 数据库，并保存到 `DOWNLOAD_DIR`。
 - 文件保存会按媒体类型放入 `photos / videos / audio / documents / stickers / other` 等目录。
 
 ### 为什么还要做配对
@@ -109,9 +113,24 @@ telegram-archiver bot
 ```bash
 telegram-archiver bot
 telegram-archiver saved
+telegram-archiver channels
 telegram-archiver saved-stats
+telegram-archiver channels-list
+telegram-archiver channel-check -1002683725559 --limit 20 --download-sample
 telegram-archiver all
 ```
+
+频道归档配置：
+
+```env
+CHANNEL_ARCHIVE_PEERS=-1002683725559,@public_channel
+CHANNEL_TELEGRAM_SESSION=./data/channel_archiver.session
+CHANNEL_ARCHIVE_EXISTING=true
+CHANNEL_RECENT_SCAN_INTERVAL_SECONDS=900
+CHANNEL_RECENT_SCAN_LIMIT=2000
+```
+
+`CHANNEL_TELEGRAM_SESSION` 默认使用独立 session，适合和 `saved-archiver` 同时运行。第一次运行 `telegram-archiver channels` 可能需要登录这个 session。频道如果返回 protected 内容标记，归档器会跳过。
 
 只统计 Saved Messages 待处理数量、不下载：
 
@@ -205,10 +224,16 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ## Docker Compose
 
-项目现在默认启动两个 source：
+项目默认启动两个 source：
 
 - `bot`：转发给 bot 的媒体归档。
 - `saved-archiver`：Saved Messages 归档。
+
+频道归档是可选第三个 source。配置 `CHANNEL_ARCHIVE_PEERS` 后，可以用额外 compose 文件启动：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.channels.yml up -d --build channel-archiver
+```
 
 另外还有两种 Docker 模式：
 
