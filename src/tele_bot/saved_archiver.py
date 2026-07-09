@@ -1537,6 +1537,7 @@ async def archive_message(
         target_dir.mkdir(parents=True, exist_ok=True)
         final_path = unique_target_path(target_dir / final_name)
         processed_temp_path.replace(final_path)
+        set_archived_file_permissions(final_path)
         if processed_temp_path != actual_temp_path:
             actual_temp_path.unlink(missing_ok=True)
 
@@ -1608,6 +1609,10 @@ async def archive_message(
                 error_message=classification.message,
             )
         LOGGER.exception("Failed to archive %s media: message=%s", log_label, message.id)
+
+def set_archived_file_permissions(path: Path) -> None:
+    path.chmod(0o644)
+
 
 def archive_source_name(source_key: str) -> str:
     return "channels" if source_key.startswith("channel_") else "saved"
@@ -1719,6 +1724,23 @@ def media_ref_matches_extensions(ref: MediaRef, allowed_extensions: frozenset[st
     return ref.extension.casefold() in allowed_extensions
 
 
+@dataclass(frozen=True)
+class ArchiveTool:
+    kind: str
+    path: str
+
+
+def archive_tool_for_ref(ref: MediaRef, *, seven_zip: str | None, unrar: str | None) -> ArchiveTool:
+    name = (ref.file_name or "").casefold()
+    if unrar is not None and (ref.extension.casefold() == ".rar" or name.endswith(".rar") or re.search(r"\.r\d{2,3}$", name)):
+        return ArchiveTool("unrar", unrar)
+    if seven_zip is not None:
+        return ArchiveTool("7z", seven_zip)
+    if unrar is not None:
+        return ArchiveTool("unrar", unrar)
+    raise RuntimeError("archive password stripping tool missing")
+
+
 def maybe_strip_archive_password(
     archive_path: Path,
     ref: MediaRef,
@@ -1740,21 +1762,23 @@ def maybe_strip_archive_password(
         return archive_processing_result(archive_path, ref, status="not_configured")
 
     seven_zip = shutil.which("7z") or shutil.which("7zz")
-    if seven_zip is None:
-        LOGGER.warning("Archive password stripping requires 7z or 7zz in PATH")
+    unrar = shutil.which("unrar")
+    if seven_zip is None and unrar is None:
+        LOGGER.warning("Archive password stripping requires 7z/7zz or unrar in PATH")
         return archive_processing_result(archive_path, ref, status="tool_missing")
 
+    tool = archive_tool_for_ref(ref, seven_zip=seven_zip, unrar=unrar)
     multipart = collect_multipart_temp_parts(temp_dir, source_key, archive_path, ref) if temp_dir is not None else None
     if multipart is not None:
         return maybe_strip_multipart_archive_password(
-            seven_zip,
+            tool,
             archive_path,
             ref,
             password_file=password_file,
             multipart=multipart,
         )
 
-    if archive_test_succeeds(seven_zip, archive_path, password=None):
+    if archive_test_succeeds(tool, archive_path, password=None):
         LOGGER.info("Archive is not password-protected or can be read without a password: path=%s", archive_path)
         return archive_processing_result(archive_path, ref, status="plain")
 
@@ -1764,9 +1788,9 @@ def maybe_strip_archive_password(
         return archive_processing_result(archive_path, ref, status="password_file_empty")
 
     for password in passwords:
-        if not archive_test_succeeds(seven_zip, archive_path, password=password):
+        if not archive_test_succeeds(tool, archive_path, password=password):
             continue
-        unlocked_path = strip_archive_password(seven_zip, archive_path, ref, password)
+        unlocked_path = strip_archive_password(tool, archive_path, ref, password)
         unlocked_ref = MediaRef(
             media_type=ref.media_type,
             file_id=ref.file_id,
@@ -1791,7 +1815,7 @@ def maybe_strip_archive_password(
 
 
 def maybe_strip_multipart_archive_password(
-    seven_zip: str,
+    tool: ArchiveTool,
     archive_path: Path,
     ref: MediaRef,
     *,
@@ -1814,8 +1838,8 @@ def maybe_strip_multipart_archive_password(
         staged_dir = Path(temp_dir_raw)
         first_path = stage_multipart_archive_parts(staged_dir, multipart)
         output_path = archive_path.with_name(f"{archive_path.stem}_unlocked.zip")
-        if archive_test_succeeds(seven_zip, first_path, password=None):
-            unlocked_path = strip_archive_password(seven_zip, first_path, ref, None, output_path=output_path)
+        if archive_test_succeeds(tool, first_path, password=None):
+            unlocked_path = strip_archive_password(tool, first_path, ref, None, output_path=output_path)
             unlocked_ref = unlocked_media_ref(ref, unlocked_path)
             return archive_processing_result(
                 unlocked_path,
@@ -1827,9 +1851,9 @@ def maybe_strip_multipart_archive_password(
                 part_count=len(multipart),
             )
         for password in passwords:
-            if not archive_test_succeeds(seven_zip, first_path, password=password):
+            if not archive_test_succeeds(tool, first_path, password=password):
                 continue
-            unlocked_path = strip_archive_password(seven_zip, first_path, ref, password, output_path=output_path)
+            unlocked_path = strip_archive_password(tool, first_path, ref, password, output_path=output_path)
             unlocked_ref = unlocked_media_ref(ref, unlocked_path)
             LOGGER.warning("Removed multipart archive password: source=%s output=%s", archive_path, unlocked_path)
             return archive_processing_result(
@@ -2013,21 +2037,25 @@ def stage_multipart_archive_parts(
 ) -> Path:
     first_path: Path | None = None
     for order, (path, display_name, part) in sorted(multipart.items()):
-        staged_path = staged_dir / sanitize_filename(display_name)
+        staged_path = staged_dir / safe_stage_archive_name(display_name)
         staged_path.symlink_to(path)
         if order == 1:
             first_path = staged_path
     if first_path is None:
         first_name = next(iter(multipart.values()))[2].first_name
-        first_path = staged_dir / first_name
+        first_path = staged_dir / safe_stage_archive_name(first_name)
     return first_path
 
 
-def archive_test_succeeds(seven_zip: str, archive_path: Path, *, password: str | None) -> bool:
-    args = [seven_zip, "t", "-y"]
-    if password is not None:
-        args.append(f"-p{password}")
-    args.append(str(archive_path))
+def safe_stage_archive_name(display_name: str) -> str:
+    name = Path(display_name).name.strip()
+    if not name or name in {".", ".."}:
+        return sanitize_filename(display_name)
+    return name
+
+
+def archive_test_succeeds(tool: ArchiveTool, archive_path: Path, *, password: str | None) -> bool:
+    args = archive_test_args(tool, archive_path, password=password)
     result = subprocess.run(
         args,
         stdin=subprocess.DEVNULL,
@@ -2038,22 +2066,35 @@ def archive_test_succeeds(seven_zip: str, archive_path: Path, *, password: str |
     return result.returncode == 0
 
 
+def archive_test_args(tool: ArchiveTool, archive_path: Path, *, password: str | None) -> list[str]:
+    if tool.kind == "unrar":
+        args = [tool.path, "t", "-y", "-idq"]
+        args.append("-p-" if password is None else f"-p{password}")
+        args.append(str(archive_path))
+        return args
+    args = [tool.path, "t", "-y"]
+    if password is not None:
+        args.append(f"-p{password}")
+    args.append(str(archive_path))
+    return args
+
+
 def strip_archive_password(
-    seven_zip: str,
+    tool: ArchiveTool,
     archive_path: Path,
     ref: MediaRef,
     password: str | None,
     *,
     output_path: Path | None = None,
 ) -> Path:
+    seven_zip = shutil.which("7z") or shutil.which("7zz")
+    if seven_zip is None:
+        raise RuntimeError("failed to repack unlocked archive: 7z or 7zz is required")
     with tempfile.TemporaryDirectory(prefix="telegram-archive-unlock-") as temp_dir_raw:
         temp_dir = Path(temp_dir_raw)
         extract_dir = temp_dir / "contents"
         extract_dir.mkdir()
-        extract_args = [seven_zip, "x", "-y", f"-o{extract_dir}"]
-        if password is not None:
-            extract_args.append(f"-p{password}")
-        extract_args.append(str(archive_path))
+        extract_args = archive_extract_args(tool, archive_path, extract_dir, password=password)
         extract_result = subprocess.run(
             extract_args,
             stdin=subprocess.DEVNULL,
@@ -2079,6 +2120,19 @@ def strip_archive_password(
         if pack_result.returncode != 0:
             raise RuntimeError(f"failed to repack unlocked archive: {pack_result.stderr.strip()}")
         return unlocked_path
+
+
+def archive_extract_args(tool: ArchiveTool, archive_path: Path, extract_dir: Path, *, password: str | None) -> list[str]:
+    if tool.kind == "unrar":
+        args = [tool.path, "x", "-y", "-idq"]
+        args.append("-p-" if password is None else f"-p{password}")
+        args.extend([str(archive_path), f"{extract_dir}/"])
+        return args
+    args = [tool.path, "x", "-y", f"-o{extract_dir}"]
+    if password is not None:
+        args.append(f"-p{password}")
+    args.append(str(archive_path))
+    return args
 
 
 def unlocked_archive_name(ref: MediaRef) -> str:
@@ -2279,6 +2333,7 @@ def archive_message_text(
         final_name = f"{sanitize_filename(source_key)}_{message.id}__{sha256[:12]}.txt"
         final_path = unique_target_path(target_root / final_name)
         temp_path.replace(final_path)
+        set_archived_file_permissions(final_path)
 
         try:
             database.record_saved_file(

@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,10 @@ import pytest
 from tele_bot.db import Database
 from tele_bot.media import MediaRef
 from tele_bot.saved_archiver import (
+    ArchiveTool,
+    archive_extract_args,
+    archive_test_args,
+    archive_tool_for_ref,
     ChannelCheckResult,
     ChannelInfo,
     SavedArchiverSettings,
@@ -41,6 +46,8 @@ from tele_bot.saved_archiver import (
     resumable_temp_path,
     scan_existing_saved_messages,
     scan_recent_saved_messages,
+    set_archived_file_permissions,
+    safe_stage_archive_name,
 )
 
 
@@ -705,6 +712,61 @@ class DownloadCompleteClient:
         yield b"complete"
 
 
+def test_archive_tool_for_ref_prefers_unrar_for_rar() -> None:
+    ref = MediaRef(
+        media_type="document",
+        file_id="file",
+        file_unique_id="unique",
+        file_name="video.part1.rar",
+        file_size=1,
+        mime_type="application/vnd.rar",
+        extension=".rar",
+    )
+
+    tool = archive_tool_for_ref(ref, seven_zip="/usr/bin/7z", unrar="/usr/bin/unrar")
+
+    assert tool == ArchiveTool("unrar", "/usr/bin/unrar")
+
+
+def test_unrar_command_args_disable_prompts(tmp_path: Path) -> None:
+    tool = ArchiveTool("unrar", "/usr/bin/unrar")
+    archive = tmp_path / "archive.rar"
+    extract_dir = tmp_path / "out"
+
+    assert archive_test_args(tool, archive, password=None) == [
+        "/usr/bin/unrar",
+        "t",
+        "-y",
+        "-idq",
+        "-p-",
+        str(archive),
+    ]
+    assert archive_extract_args(tool, archive, extract_dir, password="secret") == [
+        "/usr/bin/unrar",
+        "x",
+        "-y",
+        "-idq",
+        "-psecret",
+        str(archive),
+        f"{extract_dir}/",
+    ]
+
+
+def test_safe_stage_archive_name_preserves_multipart_name() -> None:
+    assert safe_stage_archive_name("V108.part 1.rar") == "V108.part 1.rar"
+    assert safe_stage_archive_name("nested/V108.part1.rar") == "V108.part1.rar"
+
+
+def test_set_archived_file_permissions_makes_file_world_readable(tmp_path: Path) -> None:
+    path = tmp_path / "media.mp4"
+    path.write_bytes(b"data")
+    path.chmod(0o600)
+
+    set_archived_file_permissions(path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
 class FailingRecordDatabase(Database):
     def record_saved_file(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
         raise RuntimeError("database failed")
@@ -785,6 +847,7 @@ async def test_archive_message_can_store_media_under_channel_root(tmp_path: Path
     files = list((settings.download_dir / "Example Channel" / "documents").glob("*.bin"))
     assert len(files) == 1
     assert files[0].read_bytes() == b"complete"
+    assert stat.S_IMODE(files[0].stat().st_mode) == 0o644
 
 
 @pytest.mark.anyio
